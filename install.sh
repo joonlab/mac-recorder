@@ -189,9 +189,8 @@ fi
 # ── 6. macrec 명령 ─────────────────────────────────────────────────
 step "macrec 명령"
 mkdir -p "$HOME/.local/bin"
-[ $TEST_MODE = 0 ] && ln -sf "$REPO/bin/macrec" "$HOME/.local/bin/macrec"
 chmod +x "$REPO/bin/macrec"
-ok "$HOME/.local/bin/macrec"
+if [ $TEST_MODE = 0 ]; then ln -sf "$REPO/bin/macrec" "$HOME/.local/bin/macrec"; ok "$HOME/.local/bin/macrec"; else ok "시험 설치: $REPO/bin/macrec (연결 안 함)"; fi
 if ! grep -qs '.local/bin' "$HOME/.zshrc" 2>/dev/null && [ "$(command -v macrec)" != "$HOME/.local/bin/macrec" ]; then
   warn "~/.local/bin 이 PATH 에 없으면 ~/.zshrc 에 추가하세요:  export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi

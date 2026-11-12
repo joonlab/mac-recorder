@@ -163,7 +163,8 @@ async function main() {
 
 async function doctor() {
   const line = (ok, name, detail = '') => console.log(`${ok === null ? '·' : ok ? '✅' : '⛔'} ${name}${detail ? `  ${detail}` : ''}`);
-  const has = (c) => { try { return execFileSync('/bin/zsh', ['-lc', `command -v ${c}`], { encoding: 'utf8' }).trim(); } catch { return ''; } };
+  const dirs = [...(process.env.PATH || '').split(':'), '/opt/homebrew/bin', '/usr/local/bin'];
+  const has = (c) => { for (const d of dirs) { try { fs.accessSync(path.join(d, c), fs.constants.X_OK); return path.join(d, c); } catch {} } return ''; };
   const ver = os.release();
   line(Number(execFileSync('sw_vers', ['-productVersion'], { encoding: 'utf8' }).split('.')[0]) >= 15, 'macOS 15 이상', execFileSync('sw_vers', ['-productVersion'], { encoding: 'utf8' }).trim());
   line(!!has('ffmpeg'), 'ffmpeg', has('ffmpeg'));
@@ -189,7 +190,7 @@ async function doctor() {
   }
   const la = path.join(os.homedir(), 'Library/LaunchAgents');
   let auto = '';
-  try { auto = execFileSync('/bin/zsh', ['-lc', `grep -ls 'pm2 resurrect' ${la}/*.plist 2>/dev/null | head -1`], { encoding: 'utf8' }).trim(); } catch {}
+  try { auto = fs.readdirSync(la).filter((f) => f.endsWith('.plist')).map((f) => path.join(la, f)).find((f) => { try { return fs.readFileSync(f, 'utf8').includes('resurrect'); } catch { return false; } }) || ''; } catch {}
   line(!!auto, '재부팅 후 자동 실행(pm2)', auto);
   void ver;
 }
