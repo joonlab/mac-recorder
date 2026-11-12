@@ -1,0 +1,197 @@
+#!/usr/bin/env node
+// macrec — MacRecorder 명령줄 도구. 터미널·Claude Code·Raycast 가 쓴다.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+
+const HOME = process.env.MACREC_HOME || path.join(os.homedir(), '.mac-recorder');
+const cfg = (() => { try { return JSON.parse(fs.readFileSync(path.join(HOME, 'config.json'), 'utf8')); } catch { return {}; } })();
+const PORT = Number(process.env.MACREC_PORT || cfg.port || 7931);
+const BASE = `http://127.0.0.1:${PORT}`;
+const argv = process.argv.slice(2);
+const cmd = argv[0] || 'help';
+const flags = new Set(argv.filter((a) => a.startsWith('--')));
+const pos = argv.slice(1).filter((a) => !a.startsWith('--'));
+const flagVal = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : undefined; };
+const JSONOUT = flags.has('--json');
+
+const pad = (n) => String(n).padStart(2, '0');
+const hms = (s) => { s = Math.round(s || 0); const h = Math.floor(s / 3600); return `${h ? `${h}:` : ''}${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`; };
+
+async function api(p, opts = {}) {
+  let r;
+  try {
+    r = await fetch(`${BASE}/api/${p}`, {
+      method: opts.method || (opts.body ? 'POST' : 'GET'),
+      headers: opts.body !== undefined ? { 'Content-Type': 'application/json' } : {},
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    });
+  } catch {
+    throw new Error(`서버(${BASE})에 연결할 수 없습니다. 'pm2 restart mac-recorder' 또는 './install.sh' 를 실행하세요.`);
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+const out = (obj, text) => console.log(JSONOUT ? JSON.stringify(obj, null, 2) : text);
+
+async function resolveId(x) {
+  const list = (await api('sessions')).sessions;
+  if (!list.length) throw new Error('녹화가 없습니다.');
+  if (!x || x === 'latest' || x === 'last') return list[0];
+  const s = list.find((s) => s.id === x || s.id.startsWith(x));
+  if (!s) throw new Error(`녹화를 찾지 못했습니다: ${x}`);
+  return s;
+}
+
+const HELP = `macrec — MacRecorder
+
+녹화
+  macrec start [--no-video] [--audio-only] [--no-mic] [--system] [--title "제목"]
+  macrec stop
+  macrec toggle
+  macrec status [--json]
+
+녹화 목록·파일
+  macrec list [-n 10] [--json]
+  macrec show [ID|latest] [--json]      파일 경로·전사·요약 상태
+  macrec path [ID|latest]               녹화 폴더 경로만
+  macrec open [ID]                      대시보드 열기
+  macrec folder                         녹화 폴더 열기(Finder)
+
+전사·요약 (ID 생략 = 가장 최근)
+  macrec transcribe [ID] [--summarize]  전사(+설정된 AI 로 교정·요약)
+  macrec summarize [ID]                 AI 요약만
+  macrec correct [ID]                   AI 교정만
+
+교정 사전
+  macrec glossary                       사전 보기
+  macrec glossary term "이름"           고유명사 추가
+  macrec glossary rule "잘못" "맞게"    교정 규칙 바로 추가
+  macrec glossary propose "잘못" "맞게" 교정 제안으로 올리기(대시보드에서 승인)
+
+점검
+  macrec doctor                         설치·권한·서버 상태 점검
+  macrec permissions [--request]        권한 확인 / 요청 창 띄우기
+  macrec logs                           서버 로그 위치
+`;
+
+async function main() {
+  switch (cmd) {
+    case 'help': case '-h': case '--help': console.log(HELP); return;
+
+    case 'start': {
+      const body = {};
+      if (flags.has('--no-video') || flags.has('--audio-only')) body.video = false;
+      if (flags.has('--video')) body.video = true;
+      if (flags.has('--no-mic')) body.mic = false;
+      if (flags.has('--mic')) body.mic = true;
+      if (flags.has('--system')) body.system = true;
+      if (flags.has('--no-system')) body.system = false;
+      if (flagVal('--title')) body.title = flagVal('--title');
+      const r = await api('start', { body });
+      return out(r, `● 녹화 시작 ${r.id} (${[r.sources.video && '화면', r.sources.mic && '마이크', r.sources.system && '시스템 소리'].filter(Boolean).join('·')})`);
+    }
+    case 'stop': { const r = await api('stop', { body: {} }); return out(r, `■ 녹화 정지 ${r.id} — 파일 정리 후 목록에 나타납니다.`); }
+    case 'toggle': { const r = await api('toggle', { body: {} }); return out(r, r.action === 'started' ? `● 녹화 시작 ${r.id}` : `■ 녹화 정지 ${r.id}`); }
+    case 'status': {
+      const s = await api('status');
+      const a = s.active;
+      return out(s, a ? `● 녹화 중 ${hms(a.elapsedSec)} (${a.id})` : `대기 중 · 대시보드 ${BASE} · 전사 ${s.whisper.ready ? '가능' : '미설치'} · AI ${s.ai.provider}${s.proposals ? ` · 교정 제안 ${s.proposals}개` : ''}`);
+    }
+    case 'list': case 'ls': {
+      const n = Number(flagVal('-n') || 10);
+      const list = (await api('sessions')).sessions.slice(0, n);
+      return out(list, list.map((s) => `${s.id}  ${hms(s.durationSec).padStart(8)}  ${s.hasTranscript ? '전사' : '    '} ${s.hasSummary ? '요약' : '    '}  ${s.title || ''}`).join('\n') || '녹화가 없습니다.');
+    }
+    case 'show': {
+      const s = await resolveId(pos[0]);
+      const d = await api(`sessions/${s.id}`);
+      const f = (n) => path.join(s.dir, n);
+      return out(d, [
+        `${s.title || '(제목 없음)'} — ${s.id}`,
+        `길이 ${hms(s.durationSec)} · 상태 ${s.status}${s.job?.status ? ` · 작업 ${s.job.action}:${s.job.status}${s.job.error ? ` (${s.job.error})` : ''}` : ''}`,
+        `폴더   ${s.dir}`,
+        `녹화   ${s.media ? f(s.media) : '-'}`,
+        `재생   ${s.play ? f(s.play) : '-'}`,
+        `전사   ${s.hasTranscript ? f('transcript.md') : '없음'}`,
+        `요약   ${s.hasSummary ? f('summary.md') : '없음'}`,
+      ].join('\n'));
+    }
+    case 'folder': { await api('open', { body: { what: 'recordings' } }); return; }
+    case 'path': { const s = await resolveId(pos[0]); return console.log(s.dir); }
+    case 'open': {
+      const s = pos[0] ? await resolveId(pos[0]) : null;
+      execFileSync('open', [`${BASE}/${s ? `#s=${s.id}` : ''}`]); return;
+    }
+    case 'transcribe': case 'summarize': case 'correct': {
+      const s = await resolveId(pos[0]);
+      const action = cmd === 'transcribe' ? 'pipeline' : cmd;
+      await api(`sessions/${s.id}/${action}`, { body: { summarize: flags.has('--summarize') } });
+      return out({ id: s.id, started: true }, `${s.id} — 백그라운드에서 ${cmd === 'transcribe' ? '전사' : cmd === 'summarize' ? '요약' : '교정'} 시작. 'macrec show ${s.id}' 로 확인`);
+    }
+    case 'glossary': {
+      const sub = pos[0];
+      const g = await api('glossary');
+      if (!sub) {
+        return out(g, [`고유명사: ${g.terms.join(', ') || '-'}`, '교정 규칙:', ...g.replace.map((r) => `  ${r.from} → ${r.to}`), `사전 파일: ${path.join(HOME, 'glossary.json')}`].join('\n'));
+      }
+      if (sub === 'term') { g.terms.push(pos[1]); await api('glossary', { method: 'PUT', body: g }); return console.log(`추가: ${pos[1]}`); }
+      if (sub === 'rule') { g.replace.push({ from: pos[1], to: pos[2] }); await api('glossary', { method: 'PUT', body: g }); return console.log(`규칙 추가: ${pos[1]} → ${pos[2]}`); }
+      if (sub === 'propose') {
+        const r = await api('proposals', { body: { from: pos[1], to: pos[2], source: 'claude-code', sessionId: flagVal('--session') } });
+        return console.log(r.added ? `제안 추가: ${pos[1]} → ${pos[2]} (대시보드 «교정 사전»에서 승인)` : `이미 있는 제안·규칙입니다: ${pos[1]} → ${pos[2]}`);
+      }
+      throw new Error('glossary term|rule|propose');
+    }
+    case 'permissions': {
+      const p = flags.has('--request') ? await api('permissions/request', { body: {} }) : await api('permissions');
+      const okAll = p.screen && p.microphone === 'authorized';
+      if (!flags.has('--quiet') || !okAll) {
+        out(p, `${p.screen ? '✅' : '⛔'} 화면 및 시스템 오디오 녹음\n${p.microphone === 'authorized' ? '✅' : '⛔'} 마이크 (${p.microphone})`
+          + (okAll ? '' : '\n→ 시스템 설정 → 개인정보 보호 및 보안에서 «MacRecorder Capture» 를 허용하세요. (macrec permissions --request)'));
+      } else console.log('  ✓ 권한 모두 허용됨');
+      process.exitCode = okAll ? 0 : 3;
+      return;
+    }
+    case 'doctor': return doctor();
+    case 'logs': console.log(path.join(HOME, 'logs', 'server.log')); return;
+    default: console.log(HELP); process.exitCode = 64;
+  }
+}
+
+async function doctor() {
+  const line = (ok, name, detail = '') => console.log(`${ok === null ? '·' : ok ? '✅' : '⛔'} ${name}${detail ? `  ${detail}` : ''}`);
+  const has = (c) => { try { return execFileSync('/bin/zsh', ['-lc', `command -v ${c}`], { encoding: 'utf8' }).trim(); } catch { return ''; } };
+  const ver = os.release();
+  line(Number(execFileSync('sw_vers', ['-productVersion'], { encoding: 'utf8' }).split('.')[0]) >= 15, 'macOS 15 이상', execFileSync('sw_vers', ['-productVersion'], { encoding: 'utf8' }).trim());
+  line(!!has('ffmpeg'), 'ffmpeg', has('ffmpeg'));
+  line(!!has('pm2'), 'pm2', has('pm2'));
+  const apps = path.join(os.homedir(), 'Applications');
+  line(fs.existsSync(path.join(apps, 'MacRecorder Capture.app')), '녹화 엔진 앱', path.join(apps, 'MacRecorder Capture.app'));
+  line(fs.existsSync(path.join(apps, 'MacRecorder.app')), '메뉴바 앱', path.join(apps, 'MacRecorder.app'));
+  let running = false;
+  try { running = execFileSync('pgrep', ['-x', 'MacRecorder']).length > 0; } catch {}
+  line(running, '메뉴바 앱 실행 중', running ? '' : `open ~/Applications/MacRecorder.app`);
+  let s = null;
+  try { s = await api('status'); } catch (e) { line(false, '서버', e.message); }
+  if (s) {
+    line(true, '서버', `${BASE} · v${s.version}`);
+    line(s.whisper.ready ? true : null, '로컬 전사(whisper)', s.whisper.ready ? path.basename(s.whisper.model) : '미설치 — ./install.sh --with-transcribe');
+    line(s.ai.provider === 'none' ? null : s.ai.runnable || s.ai.provider === 'claude-code', 'AI 요약', `${s.ai.provider}${s.ai.reason ? ` (${s.ai.reason})` : ''}`);
+    line(true, '녹화 폴더', s.recordingsDir);
+    try {
+      const p = await api('permissions');
+      line(p.screen, '권한: 화면 및 시스템 오디오 녹음');
+      line(p.microphone === 'authorized', '권한: 마이크', p.microphone);
+    } catch (e) { line(false, '권한 확인', e.message); }
+  }
+  const la = path.join(os.homedir(), 'Library/LaunchAgents');
+  let auto = '';
+  try { auto = execFileSync('/bin/zsh', ['-lc', `grep -ls 'pm2 resurrect' ${la}/*.plist 2>/dev/null | head -1`], { encoding: 'utf8' }).trim(); } catch {}
+  line(!!auto, '재부팅 후 자동 실행(pm2)', auto);
+  void ver;
+}
+
+main().catch((e) => { console.error(`⛔ ${e.message}`); process.exitCode = 1; });

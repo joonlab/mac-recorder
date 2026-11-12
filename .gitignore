@@ -1,0 +1,8 @@
+node_modules/
+build/
+dist/
+.DS_Store
+*.log
+# 아이콘 원본 시안(생성 중간물) — 최종본만 커밋
+native/assets/src/round2/
+docs/images/src/

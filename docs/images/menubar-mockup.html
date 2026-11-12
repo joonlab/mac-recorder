@@ -1,0 +1,38 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+body{margin:0;width:460px;height:520px;background:linear-gradient(160deg,#c9b8a6,#8d7b6b 60%,#5b4d44);font:13.5px -apple-system,"Apple SD Gothic Neo",sans-serif;}
+.bar{height:26px;background:rgba(30,28,26,.55);backdrop-filter:blur(20px);display:flex;justify-content:flex-end;align-items:center;gap:14px;padding:0 12px;color:#fff;font-size:13px}
+.rec{display:flex;align-items:center;gap:4px;background:rgba(255,255,255,.18);border-radius:5px;padding:1px 6px}
+.menu{position:absolute;right:70px;top:30px;width:330px;background:rgba(246,245,243,.92);backdrop-filter:blur(30px);border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,.35),0 0 0 .5px rgba(0,0,0,.2);padding:5px 0;color:#1c1c1a}
+.i{padding:4px 14px 4px 26px;display:flex;justify-content:space-between;position:relative}
+.i.dim{color:#7a7a75}.i .k{color:#8a8a85}.i.ck:before{content:"✓";position:absolute;left:10px}
+.i.sub:after{content:"›";color:#8a8a85}
+.sep{height:1px;background:rgba(0,0,0,.1);margin:5px 10px}
+.hl{background:#3b82f6;color:#fff;border-radius:5px;margin:0 5px;padding-left:21px}.hl .k{color:#e6efff}
+</style></head><body>
+<div class="bar"><span>Wi‑Fi</span>
+<span class="rec"><svg width="16" height="16" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7.6" fill="none" stroke="#fff" stroke-width="1.4"/><g stroke="#fff" stroke-width="1.15" stroke-linecap="round" id="b"></g><polygon id="h" fill="#e5484d"/></svg>12:48</span>
+<span>목 오후 3:58</span></div>
+<div class="menu">
+<div class="i dim">● 녹화 중 12:48 — 화면·마이크·시스템 소리</div>
+<div class="i hl">녹화 정지<span class="k">⌃⌥⌘R</span></div>
+<div class="sep"></div>
+<div class="i sub">최근 녹화</div>
+<div class="i">대시보드 열기</div>
+<div class="i">녹화 폴더 열기</div>
+<div class="i">교정 제안 3개 확인</div>
+<div class="sep"></div>
+<div class="i">설정·권한</div>
+<div class="i">MacRecorder 메뉴 닫기</div>
+</div>
+<div class="menu" style="top:290px;right:70px">
+<div class="i">녹화 시작 (화면·마이크)<span class="k">⌃⌥⌘R</span></div>
+<div class="i ck">화면</div><div class="i ck">마이크</div><div class="i">시스템 소리 (화상회의 상대 목소리)</div>
+<div class="i sub">녹화할 화면</div><div class="i sub">마이크 선택</div>
+</div>
+<script>
+const c=9,R=7.6,r=3.3,g=document.getElementById('b');let pts=[];
+for(let k=0;k<6;k++){const a1=k*Math.PI/3+Math.PI/6,a2=a1+Math.PI/3;const p1=[c+r*Math.cos(a1),c-r*Math.sin(a1)],p2=[c+r*Math.cos(a2),c-r*Math.sin(a2)];
+let dx=p2[0]-p1[0],dy=p2[1]-p1[1];const L=Math.hypot(dx,dy);dx/=L;dy/=L;const fx=p1[0]-c,fy=p1[1]-c,b=fx*dx+fy*dy;const t=-b+Math.sqrt(b*b-(fx*fx+fy*fy-(R-.6)**2));
+g.innerHTML+=`<line x1="${p1[0]}" y1="${p1[1]}" x2="${p1[0]+dx*t}" y2="${p1[1]+dy*t}"/>`;pts.push(p1.join(','));}
+document.getElementById('h').setAttribute('points',pts.join(' '));
+</script></body></html>

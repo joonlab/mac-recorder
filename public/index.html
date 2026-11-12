@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MacRecorder</title>
+  <link rel="icon" href="/app-icon.png" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><img src="/app-icon.png" alt="">MacRecorder</div>
+    <nav class="tabs" role="tablist">
+      <button data-tab="rec" class="on">녹화</button>
+      <button data-tab="dict">교정 사전 <span id="propBadge" class="badge" hidden></span></button>
+      <button data-tab="settings">설정</button>
+    </nav>
+    <div id="pill" class="pill">연결 중…</div>
+  </header>
+
+  <main>
+    <div id="banners"></div>
+
+    <!-- 녹화 -->
+    <section id="tab-rec" class="tab on">
+      <div class="card control">
+        <button id="recBtn" class="rec-btn" aria-label="녹화 시작"><span></span></button>
+        <div class="control-body">
+          <div class="control-title" id="recTitle">녹화 준비됨</div>
+          <div class="chips" id="srcChips">
+            <label class="chip"><input type="checkbox" data-src="video"> 화면</label>
+            <label class="chip"><input type="checkbox" data-src="mic"> 마이크</label>
+            <label class="chip"><input type="checkbox" data-src="system"> 시스템 소리</label>
+          </div>
+          <div class="row selects">
+            <label>화면 <select id="selDisplay"></select></label>
+            <label>마이크 <select id="selMic"></select></label>
+          </div>
+          <div class="hint" id="srcHint"></div>
+        </div>
+      </div>
+
+      <div class="list-head">
+        <h2>녹화 목록</h2>
+        <div class="row">
+          <input id="search" type="search" placeholder="제목·날짜 검색">
+          <button class="ghost" id="openFolder">폴더 열기</button>
+        </div>
+      </div>
+      <div id="sessions" class="sessions"></div>
+    </section>
+
+    <!-- 교정 사전 -->
+    <section id="tab-dict" class="tab">
+      <div class="card">
+        <h2>쓸수록 정확해지는 구조</h2>
+        <ol class="flow">
+          <li><b>전사</b> — whisper 가 이 맥에서 받아 적습니다. 아래 «고유명사»를 힌트로 씁니다.</li>
+          <li><b>규칙 적용</b> — «잘못 들은 말 → 맞는 말» 규칙을 바로 치환합니다.</li>
+          <li><b>제안 수집</b> — AI 교정, 전사 직접 수정, Claude Code 가 찾은 교정이 «교정 제안»에 쌓입니다.</li>
+          <li><b>승인</b> — 승인한 제안은 규칙이 되어 다음 녹화부터 AI 없이도 고쳐집니다.</li>
+        </ol>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>교정 제안</h2><span class="muted" id="propCount"></span></div>
+        <div id="proposals"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>내 맥락</h2><button id="saveContext">저장</button></div>
+        <p class="muted">소속, 하는 일, 자주 만나는 사람·제품 이름을 적어 두면 AI 교정과 요약이 이 내용을 기준으로 삼습니다.</p>
+        <textarea id="context" rows="4" placeholder="예) 저는 ○○팀에서 사내 AI 도입을 맡고 있습니다. 회의에 자주 나오는 이름: 김○○, 프로젝트 △△, 제품 □□"></textarea>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>고유명사</h2></div>
+        <p class="muted">사람·팀·제품·기술 이름. whisper 에 힌트로 주고, AI 교정의 기준이 됩니다.</p>
+        <div class="tags" id="terms"></div>
+        <form class="row" id="termForm"><input id="termInput" placeholder="이름 추가 (Enter)"><button>추가</button></form>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>교정 규칙</h2></div>
+        <p class="muted">전사 직후 그대로 바꿉니다. 긴 규칙부터 적용합니다.</p>
+        <table class="rules"><thead><tr><th>잘못 들은 말</th><th></th><th>맞는 말</th><th></th></tr></thead><tbody id="rules"></tbody></table>
+        <form class="row" id="ruleForm"><input id="ruleFrom" placeholder="잘못 들은 말"><span>→</span><input id="ruleTo" placeholder="맞는 말"><button>추가</button></form>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>버릴 문장</h2></div>
+        <p class="muted">조용한 구간에서 whisper 가 지어내는 문장입니다. 이 문장만 있는 줄은 전사에서 뺍니다.</p>
+        <div class="tags" id="ignores"></div>
+        <form class="row" id="ignoreForm"><input id="ignoreInput" placeholder="문장 추가 (Enter)"><button>추가</button></form>
+      </div>
+    </section>
+
+    <!-- 설정 -->
+    <section id="tab-settings" class="tab">
+      <div class="card">
+        <div class="card-head"><h2>권한</h2><button class="ghost" id="permRefresh">다시 확인</button></div>
+        <div id="perm"></div>
+      </div>
+
+      <div class="card">
+        <h2>녹화 기본값</h2>
+        <div class="grid2">
+          <label>영상 가로 크기 <select id="cfgWidth"><option value="0">원본</option><option value="2560">2560</option><option value="1920">1920</option><option value="1280">1280</option></select></label>
+          <label>초당 프레임 <select id="cfgFps"><option>30</option><option>15</option><option>10</option></select></label>
+        </div>
+        <p class="muted">화면·마이크·시스템 소리 기본 선택은 녹화 탭과 메뉴바에서 바꾼 값이 그대로 저장됩니다.</p>
+      </div>
+
+      <div class="card">
+        <h2>전사 (이 맥에서, 외부 전송 없음)</h2>
+        <div id="whisperState" class="muted"></div>
+        <div class="grid2">
+          <label class="switch"><input type="checkbox" id="cfgAutoTx"> 녹화가 끝나면 자동 전사</label>
+          <label class="switch"><input type="checkbox" id="cfgSplit"> 나·상대 구분 (마이크·시스템 소리를 따로 전사)</label>
+          <label>언어 <select id="cfgLang"><option value="ko">한국어</option><option value="en">English</option><option value="ja">日本語</option><option value="auto">자동 감지</option></select></label>
+        </div>
+        <p class="muted">«나·상대 구분»은 이어폰을 끼고 화상회의를 할 때 정확합니다. 스피커로 들으면 상대 목소리가 마이크에도 들어가 두 번 적힐 수 있습니다.</p>
+      </div>
+
+      <div class="card">
+        <h2>요약·교정 AI</h2>
+        <p class="muted">AI 에는 전사 글만 보냅니다. 소리·영상은 이 맥 밖으로 나가지 않습니다. 회사 정보가 담긴 녹화라면 회사의 AI 사용 기준을 먼저 확인하세요.</p>
+        <div class="providers" id="providers">
+          <label><input type="radio" name="prov" value="none"> 사용 안 함 <small>전사까지만</small></label>
+          <label><input type="radio" name="prov" value="claude-code"> 내 Claude Code 세션에서 <small>버튼으로 지시문을 복사해 붙여 넣음</small></label>
+          <label><input type="radio" name="prov" value="claude-cli"> Claude Code 자동 실행 <small><code>claude -p</code> · 내 구독 사용</small></label>
+          <label><input type="radio" name="prov" value="openai"> OpenAI API <small>내 API 키</small></label>
+          <label><input type="radio" name="prov" value="anthropic"> Anthropic API <small>내 API 키</small></label>
+        </div>
+        <div class="grid2 prov-detail" data-for="openai">
+          <label>OpenAI API 키 <input type="password" id="openaiKey" autocomplete="off" placeholder="sk-..."></label>
+          <label>모델 <input id="openaiModel"></label>
+        </div>
+        <div class="grid2 prov-detail" data-for="anthropic">
+          <label>Anthropic API 키 <input type="password" id="anthropicKey" autocomplete="off" placeholder="sk-ant-..."></label>
+          <label>모델 <input id="anthropicModel"></label>
+          <label>노력 수준(effort) <select id="anthropicEffort"><option>low</option><option>medium</option><option>high</option></select></label>
+        </div>
+        <div class="prov-detail muted" data-for="claude-cli" id="cliState"></div>
+        <div class="grid2">
+          <label class="switch"><input type="checkbox" id="cfgLlmCorr"> 전사 후 AI 교정 (사전·맥락 기준)</label>
+          <label class="switch"><input type="checkbox" id="cfgAutoSum"> 녹화가 끝나면 자동 요약</label>
+        </div>
+        <div class="row"><button id="saveAi">저장</button><button class="ghost" id="testAi">연결 테스트</button><span id="aiMsg" class="muted"></span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>요약 형식</h2><div class="row"><button class="ghost" id="resetPrompt">기본값으로</button><button id="savePrompt">저장</button></div></div>
+        <p class="muted"><code>{{transcript}}</code> <code>{{context}}</code> <code>{{date}}</code> <code>{{duration}}</code> <code>{{title}}</code> 자리에 값이 들어갑니다. 첫 줄의 <code># 제목</code>이 녹화 제목이 됩니다.</p>
+        <textarea id="promptText" rows="14" class="mono"></textarea>
+      </div>
+
+      <div class="card">
+        <h2>저장 위치·접속</h2>
+        <div id="paths" class="muted"></div>
+        <details><summary>폰이나 다른 맥에서 대시보드 열기 (Tailscale)</summary>
+          <p>이 서버는 보안을 위해 이 맥 안(127.0.0.1)에서만 열립니다. Tailscale 을 쓰고 있다면 터미널에서 아래 한 줄로 내 기기들에게만 열 수 있습니다.</p>
+          <pre id="tsCmd"></pre>
+          <p>그다음 설정 파일(<code>~/.mac-recorder/config.json</code>)의 <code>allowedHosts</code> 에 <code>"*.ts.net"</code> 을 넣고 서버를 다시 시작하세요.</p>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <!-- 녹화 상세 -->
+  <div id="drawer" class="drawer" hidden>
+    <div class="drawer-bg" data-close></div>
+    <div class="drawer-panel" role="dialog" aria-modal="true">
+      <div class="drawer-head">
+        <input id="dTitle" class="title-input" placeholder="제목 없음">
+        <button class="icon" data-close aria-label="닫기">✕</button>
+      </div>
+      <div class="muted" id="dMeta"></div>
+      <div id="dPlayer" class="player"></div>
+      <div class="row wrap" id="dActions"></div>
+      <div id="dJob"></div>
+      <nav class="subtabs"><button data-sub="tx" class="on">전사</button><button data-sub="sum">요약</button><button data-sub="files">파일</button></nav>
+      <div id="sub-tx" class="sub on"></div>
+      <div id="sub-sum" class="sub"></div>
+      <div id="sub-files" class="sub"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

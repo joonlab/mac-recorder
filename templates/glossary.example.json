@@ -1,0 +1,9 @@
+{
+  "terms": ["Claude Code", "ChatGPT", "Slack", "Notion", "GitHub", "Jira"],
+  "replace": [
+    { "from": "클로드 코드", "to": "Claude Code" },
+    { "from": "깃허브", "to": "GitHub" },
+    { "from": "슬렉", "to": "Slack" }
+  ],
+  "ignore": []
+}

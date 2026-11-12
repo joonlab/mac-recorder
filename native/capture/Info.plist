@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>MacRecorder Capture</string>
+  <key>CFBundleDisplayName</key><string>MacRecorder Capture</string>
+  <key>CFBundleIdentifier</key><string>io.github.joonlab.macrecorder.capture</string>
+  <key>CFBundleExecutable</key><string>MacRecorderCapture</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+  <key>CFBundleVersion</key><string>__VERSION__</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>LSMinimumSystemVersion</key><string>15.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSScreenCaptureUsageDescription</key><string>MacRecorder가 녹화 중에 화면과 시스템 소리를 이 맥 안에 저장합니다.</string>
+  <key>NSMicrophoneUsageDescription</key><string>MacRecorder가 녹화 중에 마이크 소리를 이 맥 안에 저장합니다.</string>
+</dict>
+</plist>
