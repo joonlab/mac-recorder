@@ -5,6 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+// `macrec ... | head` 처럼 출력을 잘라 읽을 때 나는 EPIPE 는 정상 종료로 본다
+process.stdout.on('error', (e) => { if (e.code === 'EPIPE') process.exit(0); throw e; });
+
 const HOME = process.env.MACREC_HOME || path.join(os.homedir(), '.mac-recorder');
 const cfg = (() => { try { return JSON.parse(fs.readFileSync(path.join(HOME, 'config.json'), 'utf8')); } catch { return {}; } })();
 const PORT = Number(process.env.MACREC_PORT || cfg.port || 7931);
