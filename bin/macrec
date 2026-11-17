@@ -76,6 +76,8 @@ const HELP = `macrec — MacRecorder
 
 점검
   macrec doctor                         설치·권한·서버 상태 점검
+  macrec update                         GitHub 에서 최신 버전 받아 다시 설치(지난번 옵션 그대로)
+  macrec version                        버전과 설치 위치
   macrec permissions [--request]        권한 확인 / 요청 창 띄우기
   macrec logs                           서버 로그 위치
 `;
@@ -160,8 +162,36 @@ async function main() {
     }
     case 'doctor': return doctor();
     case 'logs': console.log(path.join(HOME, 'logs', 'server.log')); return;
+    case 'version': case 'where': {
+      const repo = repoDir();
+      let ver = '?'; try { ver = fs.readFileSync(path.join(repo, 'VERSION'), 'utf8').trim(); } catch {}
+      return out({ version: ver, repo }, `MacRecorder ${ver}\n설치 위치 ${repo}`);
+    }
+    case 'update': return update();
     default: console.log(HELP); process.exitCode = 64;
   }
+}
+
+/** 설치 위치: install.json → 이 스크립트의 실제 위치(~/.local/bin/macrec 은 저장소 bin/macrec 으로 연결돼 있다) */
+function repoDir() {
+  try { const r = JSON.parse(fs.readFileSync(path.join(HOME, 'install.json'), 'utf8')).repo; if (r && fs.existsSync(r)) return r; } catch {}
+  return path.resolve(path.dirname(fs.realpathSync(process.argv[1])), '..');
+}
+
+/** 업데이트: GitHub 에서 받아 지난번과 같은 옵션으로 다시 설치 */
+async function update() {
+  const repo = repoDir();
+  const run = (cmd, args) => execFileSync(cmd, args, { stdio: 'inherit' });
+  const ver = () => { try { return fs.readFileSync(path.join(repo, 'VERSION'), 'utf8').trim(); } catch { return '?'; } };
+  const before = ver();
+  console.log(`설치 위치 ${repo} · 지금 버전 ${before}`);
+  try { execFileSync('git', ['-C', repo, 'diff', '--quiet']); }
+  catch { throw new Error(`${repo} 에 직접 고친 파일이 있어 업데이트를 멈췄습니다. 'git -C ${repo} status' 로 확인하세요.`); }
+  run('git', ['-C', repo, 'pull', '--ff-only']);
+  const after = ver();
+  if (before === after && !flags.has('--force')) { console.log(`이미 최신입니다(${after}). 다시 설치하려면 macrec update --force`); return; }
+  run(path.join(repo, 'install.sh'), ['--reuse']);
+  console.log(`\n업데이트 완료: ${before} → ${after}. 바뀐 내용: ${path.join(repo, 'CHANGELOG.md')}`);
 }
 
 async function doctor() {

@@ -5,6 +5,7 @@
 #   ./install.sh --with-transcribe   + 로컬 전사(whisper.cpp, 모델 약 0.9GB 내려받음)
 #   ./install.sh --with-claude-skill + Claude Code 스킬(~/.claude/skills/mac-recorder)
 #   ./install.sh --all               위 둘 다
+#   ./install.sh --reuse             업데이트: 지난번과 같은 옵션으로(`macrec update` 가 이걸 부른다)
 #   옵션: --port 7931  --recordings ~/Movies/MacRecorder  --no-menubar  --no-autostart
 #
 # 하는 일
@@ -22,12 +23,13 @@ APPS="${MACREC_APPS:-$HOME/Applications}"   # 시험용으로 바꿀 수 있다
 PM2_NAME="${MACREC_PM2_NAME:-mac-recorder}"
 TEST_MODE=0; [ -n "${MACREC_APPS:-}" ] && TEST_MODE=1   # 시험 설치: 실제 앱 권한·macrec 연결·스킬은 건드리지 않는다
 PORT=""; RECDIR=""
-WITH_TX=0; WITH_SKILL=0; MENUBAR=1; AUTOSTART=1
+WITH_TX=0; WITH_SKILL=0; MENUBAR=1; AUTOSTART=1; REUSE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --with-transcribe) WITH_TX=1 ;;
     --with-claude-skill) WITH_SKILL=1 ;;
     --all) WITH_TX=1; WITH_SKILL=1 ;;
+    --reuse) REUSE=1 ;;   # 업데이트: 지난번 설치 옵션 그대로(macrec update 가 쓴다)
     --port) PORT="$2"; shift ;;
     --recordings) RECDIR="$2"; shift ;;
     --no-menubar) MENUBAR=0 ;;
@@ -37,6 +39,18 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# 지난번 설치 옵션 불러오기. 기록 파일(install.json)이 없는 0.1.0 설치는 설치된 것을 보고 판단한다.
+if [ $REUSE = 1 ]; then
+  PREV="${MACREC_HOME:-$HOME/.mac-recorder}/install.json"
+  if [ -f "$PREV" ]; then
+    eval "$(node -e 'const o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).options||{};
+      console.log(`WITH_TX=${o.transcribe?1:0}; WITH_SKILL=${o.skill?1:0}; MENUBAR=${o.menubar===false?0:1}; AUTOSTART=${o.autostart===false?0:1}`)' "$PREV")"
+  else
+    { command -v whisper-cli >/dev/null || [ -x /opt/homebrew/bin/whisper-cli ]; } && WITH_TX=1
+    [ -d "$HOME/.claude/skills/mac-recorder" ] && WITH_SKILL=1
+  fi
+fi
 
 B=$'\033[1m'; G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; N=$'\033[0m'
 step() { printf "\n${B}▶ %s${N}\n" "$*"; }
@@ -268,6 +282,13 @@ EOF
   fi
 fi
 [ $MENUBAR = 1 ] && { open -g "$APPS/MacRecorder.app"; ok "메뉴바 아이콘 실행(화면 오른쪽 위 ◉)"; }
+
+# 다음 업데이트(macrec update · Claude Code)가 설치 위치와 옵션을 알 수 있게 기록
+"$NODE" -e '
+  const [f,repo,ver,tx,sk,mb,au]=process.argv.slice(1);
+  require("fs").writeFileSync(f, JSON.stringify({repo, version:ver, installedAt:new Date().toISOString(),
+    options:{transcribe:tx==="1", skill:sk==="1", menubar:mb==="1", autostart:au==="1"}}, null, 2)+"\n");
+' "$HOME_DIR/install.json" "$REPO" "$(cat "$REPO/VERSION")" "$WITH_TX" "$WITH_SKILL" "$MENUBAR" "$AUTOSTART"
 
 # ── 9. 마무리 ──────────────────────────────────────────────────────
 step "권한 확인"

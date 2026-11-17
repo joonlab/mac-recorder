@@ -21,7 +21,7 @@ pm2 restart mac-recorder
 tail -50 ~/.mac-recorder/logs/server.log
 ```
 
-- `pm2: command not found` → `npm install -g pm2` 후 `~/Developer/mac-recorder/install.sh` 다시 실행
+- `pm2: command not found` → `npm install -g pm2` 후 설치 위치(`macrec version` 으로 확인)의 `install.sh --reuse` 다시 실행
 - 재부팅 뒤에만 안 뜬다 → `ls ~/Library/LaunchAgents | grep -i pm2` 로 자동 실행 항목이 있는지 확인. 없으면 `install.sh` 를 다시 실행
 - 포트 충돌 → `lsof -nP -iTCP:7931 -sTCP:LISTEN` 으로 확인하고 `install.sh --port 7941`
 
@@ -66,10 +66,10 @@ whisper large-v3-turbo 는 Apple Silicon 에서 1시간 녹음에 수 분이 걸
 
 ## 모니터를 뺐더니 녹화가 끊겼다
 
-0.2.0 부터는 모니터를 빼도 녹화가 이어집니다(README «모니터 연결·분리» 절). 0.1.0 에서는 외장 모니터가 주 디스플레이일 때 HDMI 를 빼면 녹화가 끝났습니다. 업데이트하세요.
+0.2.0 부터는 모니터를 빼도 녹화가 이어집니다(README «모니터 연결·분리» 절). 0.1.0 에서는 외장 모니터가 주 디스플레이일 때 HDMI 를 빼면 녹화가 끝났습니다. Claude Code 세션에 아래 한 줄을 붙여 넣어 업데이트하세요.
 
-```bash
-git -C ~/Developer/mac-recorder pull && ~/Developer/mac-recorder/install.sh --all
+```
+https://github.com/joonlab/mac-recorder 최신 버전으로 업데이트해 줘.
 ```
 
 녹화 엔진이 바뀌는 업데이트라 화면 기록 권한을 한 번 다시 켜야 합니다. 녹화 상세의 «녹화 중 화면 변화»에서 언제 어느 화면이 빠지고 돌아왔는지 볼 수 있습니다.
@@ -80,9 +80,6 @@ git -C ~/Developer/mac-recorder pull && ~/Developer/mac-recorder/install.sh --al
 
 ## 완전히 지우고 다시 설치
 
-```bash
-~/Developer/mac-recorder/uninstall.sh
-~/Developer/mac-recorder/install.sh --all
-```
+`macrec version` 으로 설치 위치를 확인하고, 그 폴더에서 `uninstall.sh` → `install.sh --all` 순서로 실행합니다.
 
 녹화(`~/Movies/MacRecorder`)와 설정(`~/.mac-recorder`)은 남습니다. 설정까지 지우려면 `~/.mac-recorder` 를 휴지통으로 옮기세요.

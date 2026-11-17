@@ -1,6 +1,7 @@
-# AI 에이전트용 설치 절차
+# AI 에이전트용 설치·업데이트 절차
 
-사용자가 이 저장소 링크를 주며 «설치해 줘», «나도 쓸 수 있게 해 줘»라고 하면 이 문서를 위에서부터 따릅니다.
+- 사용자가 이 저장소 링크를 주며 «설치해 줘», «나도 쓸 수 있게 해 줘»라고 하면 이 문서를 위에서부터 따릅니다.
+- «업데이트해 줘», «최신 버전으로»라고 하면 맨 아래 **«업데이트»** 절로 바로 갑니다. 이미 설치돼 있는데 설치를 부탁받은 경우도 업데이트로 처리합니다(1절의 확인 명령으로 판단).
 목표: 사용자가 메뉴바 아이콘이나 ⌃⌥⌘R 로 바로 녹화를 시작할 수 있는 상태까지 만들고, 시험 녹화로 확인합니다.
 
 ## 지킬 것
@@ -14,7 +15,7 @@
 ## 1. 환경 확인
 
 ```bash
-sw_vers -productVersion; uname -m; command -v brew; ls -d ~/Developer/mac-recorder 2>/dev/null
+sw_vers -productVersion; uname -m; command -v brew; cat ~/.mac-recorder/install.json 2>/dev/null; readlink ~/.local/bin/macrec 2>/dev/null
 ```
 
 - macOS 15 미만이면 설치할 수 없다고 알리고 멈춥니다(ScreenCaptureKit 마이크 녹음이 macOS 15 부터).
@@ -37,7 +38,7 @@ sw_vers -productVersion; uname -m; command -v brew; ls -d ~/Developer/mac-record
 ## 3. 받기·설치
 
 ```bash
-git clone https://github.com/joonlab/mac-recorder.git ~/Developer/mac-recorder   # 이미 있으면: git -C ~/Developer/mac-recorder pull
+git clone https://github.com/joonlab/mac-recorder.git ~/Developer/mac-recorder
 ~/Developer/mac-recorder/install.sh --with-claude-skill [--with-transcribe]
 ```
 
@@ -105,6 +106,26 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapt
 - 단축키 **⌃⌥⌘R**: 어디서든 녹화 시작·정지
 - 대시보드 **http://127.0.0.1:7931**: 녹화 목록·재생·전사·요약·교정 사전·설정
 - Claude Code 에서: «방금 회의 녹화 요약해 줘», «오늘 녹화에서 할 일 뽑아 줘»
-- Raycast 를 쓰면: Raycast 설정 → Extensions → Script Commands → Add Directories → `~/Developer/mac-recorder/raycast`
+- Raycast 를 쓰면: Raycast 설정 → Extensions → Script Commands → Add Directories → `<설치 위치>/raycast`
 - 녹화는 `~/Movies/MacRecorder` 에 저장되고 이 맥 밖으로 나가지 않습니다. 요약 AI 를 켜면 전사 글만 그 AI 로 갑니다.
-- 업데이트: `git -C ~/Developer/mac-recorder pull && ~/Developer/mac-recorder/install.sh --with-claude-skill [--with-transcribe]`
+- 업데이트: Claude Code 에 «https://github.com/joonlab/mac-recorder 최신 버전으로 업데이트해 줘» 또는 터미널에서 `macrec update`
+
+## 업데이트
+
+1. **설치 위치 찾기.** 아래 순서로 처음 나오는 것을 씁니다. 경로를 짐작하지 않습니다.
+   ```bash
+   cat ~/.mac-recorder/install.json 2>/dev/null          # "repo" 값 (0.2.0 부터 기록)
+   readlink ~/.local/bin/macrec 2>/dev/null              # <설치 위치>/bin/macrec
+   grep -o "script: '[^']*'" ~/.mac-recorder/ecosystem.config.cjs 2>/dev/null   # <설치 위치>/server/index.mjs
+   ```
+   셋 다 없으면 설치된 적이 없는 것이므로 위의 설치 절차를 따릅니다.
+2. **받기 전 확인.** `git -C <설치 위치> status --short` 에 고친 파일이 있으면 사용자에게 알리고 멈춥니다(덮어쓰지 않습니다).
+3. **받고 다시 설치.** 지난번과 같은 옵션(전사·스킬 등)으로 설치합니다.
+   ```bash
+   git -C <설치 위치> pull --ff-only
+   <설치 위치>/install.sh --reuse
+   ```
+   0.2.0 이상이 설치돼 있으면 `~/.local/bin/macrec update` 한 줄로 같은 일을 합니다.
+4. **권한.** 설치 출력에 «처음 한 번 권한 허용이 필요합니다»가 있으면 녹화 엔진이 바뀐 것입니다. 위 5절(권한 허용)과 똑같이 진행합니다. 이 문구가 없으면 권한은 그대로입니다.
+5. **확인.** 6절의 시험 녹화와 `macrec doctor` 를 실행합니다.
+6. **알리기.** `<설치 위치>/CHANGELOG.md` 에서 이전 버전 이후 바뀐 내용을 두세 줄로 요약해 사용자에게 알려 줍니다.

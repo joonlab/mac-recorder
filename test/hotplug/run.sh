@@ -4,7 +4,6 @@
 # 사용: test/hotplug/run.sh   (설치된 MacRecorder 서버가 떠 있어야 함)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-REPO="$(cd "$HERE/../.." && pwd)"
 PORT="$(node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.env.HOME+"/.mac-recorder/config.json","utf8")).port||7931)}catch{console.log(7931)}')"
 API="http://127.0.0.1:$PORT/api"
 TMP="$(mktemp -d)"; VD="$TMP/vdisplay"

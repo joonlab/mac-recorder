@@ -155,10 +155,15 @@ API 키는 대시보드 설정 화면에서 넣으며 `~/.mac-recorder/secrets.j
 
 ## 업데이트·제거
 
-```bash
-git -C ~/Developer/mac-recorder pull && ~/Developer/mac-recorder/install.sh --all   # 업데이트
-~/Developer/mac-recorder/uninstall.sh                                              # 제거 (녹화·설정은 남김)
+**업데이트**: Claude Code 세션에 아래 한 줄을 붙여 넣으세요. 설치 위치를 찾아 최신 버전을 받고, 처음 설치할 때와 같은 옵션(전사·스킬 등)으로 다시 설치합니다. 권한을 다시 켜야 하면 안내합니다.
+
 ```
+https://github.com/joonlab/mac-recorder 최신 버전으로 업데이트해 줘.
+```
+
+터미널에서 직접 하려면 `macrec update` 입니다(0.2.0 부터). 바뀐 내용은 [`CHANGELOG.md`](CHANGELOG.md) 에 있습니다.
+
+**제거**: `macrec version` 으로 설치 위치를 확인한 뒤 그 폴더의 `uninstall.sh` 를 실행합니다. 녹화와 설정은 남깁니다.
 
 녹화 엔진(`MacRecorder Capture`)이 바뀐 업데이트에서는 화면 기록·마이크 권한을 한 번 더 허용해야 합니다. 설치 스크립트가 예전 권한 기록을 정리하고 안내합니다. 메뉴바·서버만 바뀐 업데이트는 권한을 다시 묻지 않습니다.
 

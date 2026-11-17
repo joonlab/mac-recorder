@@ -1,5 +1,11 @@
 # 변경 기록
 
+## 0.2.1 (2026-11-17)
+
+- 업데이트를 쉽게: Claude Code 에 «https://github.com/joonlab/mac-recorder 최신 버전으로 업데이트해 줘» 한 줄이면 설치 위치를 찾아 업데이트합니다. 터미널에서는 `macrec update`.
+- 설치할 때 설치 위치와 옵션을 `~/.mac-recorder/install.json` 에 기록하고, `install.sh --reuse` 로 같은 옵션을 다시 씁니다.
+- `macrec version`: 버전과 설치 위치 확인.
+
 ## 0.2.0 (2026-11-17)
 
 녹화 중 모니터를 빼면 녹화가 끝나던 문제를 고쳤습니다.
