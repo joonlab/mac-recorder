@@ -54,6 +54,7 @@ final class Model: ObservableObject {
   @Published var busy = false
   @Published var lastError: String? = nil
   @Published var proposals = 0
+  @Published var notice: String? = nil   // 녹화 중 화면 변화(모니터 분리 등) 마지막 기록
   private var tick = 0
 
   init() {
@@ -73,7 +74,8 @@ final class Model: ObservableObject {
           recording = true
           elapsed = a["elapsedSec"] as? Int ?? 0
           starting = (a["state"] as? String) == "starting"
-        } else { recording = false; elapsed = 0; starting = false }
+          notice = Model.noticeText((a["events"] as? [[String: Any]])?.last)
+        } else { recording = false; elapsed = 0; starting = false; notice = nil }
         if let r = s["record"] as? [String: Any] {
           video = r["video"] as? Bool ?? true; mic = r["mic"] as? Bool ?? true; system = r["system"] as? Bool ?? false
           display = (r["display"] as? String) ?? String(describing: r["display"] ?? "all")
@@ -96,6 +98,27 @@ final class Model: ObservableObject {
       return Recent(id: id, title: t)
     }
   }
+  /// «으로/로»: 받침이 있으면(ㄹ 받침 제외) «으로»
+  static func ro(_ n: String) -> String {
+    guard let u = n.unicodeScalars.last?.value, u >= 0xAC00, u <= 0xD7A3 else { return n + "로" }
+    let j = (u - 0xAC00) % 28
+    return n + (j != 0 && j != 8 ? "으로" : "로")
+  }
+
+  static func noticeText(_ e: [String: Any]?) -> String? {
+    guard let e, let t = e["type"] as? String else { return nil }
+    let n = e["name"] as? String ?? "화면"
+    switch t {
+    case "primary-moved": return "\(ro(n)) 옮겨 계속 녹화 중"
+    case "primary-lost": return "\(n) 연결 끊김 — 다시 연결을 기다리는 중"
+    case "primary-returned", "primary-resumed": return "\(n)에서 녹화 중"
+    case "display-lost": return "\(n) 분리됨 — 녹화는 계속"
+    case "display-resumed": return "\(n) 다시 연결 — 이어서 녹화"
+    case "display-added": return "\(n) 연결 — 녹화에 추가"
+    default: return nil
+    }
+  }
+
   static func label(_ id: String) -> String {
     // 20261112-150000 → 11/12 15:00
     let c = Array(id)
@@ -199,6 +222,7 @@ struct MenuContent: View {
       Divider()
     } else if m.recording {
       Text(m.starting ? "● 녹화 시작 중…" : "● 녹화 중 \(m.elapsedText) — \(m.sourcesText)")
+      if let n = m.notice { Text("↳ \(n)") }
       Button("녹화 정지") { m.toggle() }.keyboardShortcut("r", modifiers: [.control, .option, .command])
       Divider()
     } else {

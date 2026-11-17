@@ -1,6 +1,7 @@
 // MacRecorder Capture — ScreenCaptureKit 녹화 엔진
 //
-// 화면 + 시스템 소리 + 마이크를 하나의 SCStream 으로 동기 캡처해 파일 하나에 담는다.
+// 화면 + 시스템 소리 + 마이크를 ScreenCaptureKit 으로 동기 캡처해 파일에 담는다.
+// 녹화 중 모니터를 빼거나 꽂아도 녹화는 끊기지 않는다(아래 «화면 변화» 절).
 //   영상 모드   : recording.mp4  = 비디오 + 시스템 소리(stereo) 트랙 + 마이크(mono) 트랙
 //   오디오 모드 : recording.m4a  = 시스템 소리 트랙 + 마이크 트랙 (비디오 없음)
 // 트랙을 나눠 두는 이유: 전사할 때 «나(마이크)»와 «상대(시스템 소리)»를 구분할 수 있다.
@@ -35,7 +36,8 @@ var micDeviceID: String? = nil
 var statusFile: String? = nil
 var mixScript: String? = nil
 var jsonOut: String? = nil
-var extraSpecs: [(UInt32, String)] = []
+var allDisplays = false   // --displays all : 연결된 화면 전부(녹화 중 새로 꽂은 화면 포함)
+var fallback = true       // --fallback 0 : 주 화면이 사라져도 다른 화면으로 옮기지 않음
 var mode = "record"
 
 do {
@@ -58,9 +60,8 @@ do {
     case "--status-file": statusFile = next()
     case "--mix-script": mixScript = next()
     case "--json-out": jsonOut = next()
-    case "--extra":
-      let parts = next().split(separator: ":", maxSplits: 1).map(String.init)
-      if parts.count == 2, let id = UInt32(parts[0]) { extraSpecs.append((id, parts[1])) }
+    case "--displays": allDisplays = next() == "all"
+    case "--fallback": fallback = next() != "0"
     default: break
     }
     i += 1
@@ -146,9 +147,9 @@ if mode == "request" {
 // MARK: - 녹화
 
 guard !outPath.isEmpty else { log("--out 필요"); exit(64) }
+let outDir = (outPath as NSString).deletingLastPathComponent
 
 /// 녹화가 끝난 뒤 재생용 믹스 파일을 만든다(마이크+시스템 소리가 둘 다 있을 때만).
-/// 여기(finalize 직후)에 두는 이유: 잠자기로 스트림이 끊기는 경로까지 한 곳에서 처리된다.
 @Sendable func spawnMixer(_ media: String) {
   guard wantMic, wantSystem, let script = mixScript, FileManager.default.isExecutableFile(atPath: script) else { return }
   let p = Process()
@@ -159,218 +160,436 @@ guard !outPath.isEmpty else { log("--out 필요"); exit(64) }
   do { try p.run(); log("mixer pid=\(p.processIdentifier)") } catch { log("mixer error: \(error)") }
 }
 
+// MARK: - 화면 정보
+
+func onlineDisplayIDs() -> [UInt32] {
+  var n: UInt32 = 0
+  guard CGGetActiveDisplayList(0, nil, &n) == .success, n > 0 else { return [] }
+  var ids = [CGDirectDisplayID](repeating: 0, count: Int(n))
+  guard CGGetActiveDisplayList(n, &ids, &n) == .success else { return [] }
+  return Array(ids.prefix(Int(n)))
+}
+let isBuiltin = { (id: UInt32) in CGDisplayIsBuiltin(id) != 0 }
+
+/// 화면 이름 — 연결돼 있을 때 정해 두고, 빠진 뒤에는 기억해 둔 이름을 쓴다.
+/// 이 프로세스의 NSScreen 목록은 시작 이후 갱신되지 않는다(백그라운드 프로세스라 화면 변경 알림을 받지 못함, 실측).
+/// 그래서 처음 보는 화면은 이 앱을 --list 로 짧게 한 번 더 실행해 최신 이름을 받는다.
+var displayNames: [UInt32: String] = [:]
+var realNames: Set<UInt32> = []
+var nameTries: [UInt32: Int] = [:]   // 화면마다 이름 읽기 최대 3번(막 연결된 직후엔 목록에 아직 없을 수 있다)
+func setName(_ id: UInt32, _ name: String, real: Bool) {
+  if realNames.contains(id) { return }            // 확정된 이름은 덮어쓰지 않는다
+  if !real && displayNames[id] != nil { return }
+  displayNames[id] = name
+  if real { realNames.insert(id) }
+}
+func rememberName(_ id: UInt32) {
+  guard onlineDisplayIDs().contains(id) else { return }
+  if isBuiltin(id) { setName(id, "내장 디스플레이", real: true); return }
+  for s in NSScreen.screens {
+    if let n = s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber, n.uint32Value == id {
+      setName(id, s.localizedName, real: true); return
+    }
+  }
+  setName(id, "외장 모니터 \(CGDisplayPixelsWide(id))×\(CGDisplayPixelsHigh(id))", real: false)
+}
+/// 이름을 모르는 화면이 있으면 새 프로세스로 화면 목록을 다시 읽는다(약 0.3초).
+func refreshNames(_ ids: Set<UInt32>) {
+  let todo = ids.filter { !realNames.contains($0) && nameTries[$0, default: 0] < 3 }
+  guard !todo.isEmpty, let exe = Bundle.main.executablePath else { return }
+  for id in todo { nameTries[id, default: 0] += 1 }
+  let tmp = NSTemporaryDirectory() + "macrec-names-\(getpid()).json"
+  let p = Process()
+  p.executableURL = URL(fileURLWithPath: exe)
+  p.arguments = ["--list", "--json-out", tmp]
+  p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+  guard (try? p.run()) != nil else { return }
+  let deadline = Date().addingTimeInterval(3)
+  while p.isRunning && Date() < deadline { usleep(50_000) }
+  if p.isRunning { p.terminate() }
+  defer { try? FileManager.default.removeItem(atPath: tmp) }
+  guard let d = FileManager.default.contents(atPath: tmp),
+        let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+        let list = j["displays"] as? [[String: Any]] else { return }
+  for x in list { if let id = x["id"] as? Int, let n = x["name"] as? String { setName(UInt32(id), n, real: true) } }
+}
+func displayName(_ id: UInt32) -> String {
+  if displayNames[id] == nil { rememberName(id) }
+  return displayNames[id] ?? "화면 \(id)"
+}
+
+/// 같은 모니터인지 알아보는 값. 다시 꽂으면 화면 ID 가 바뀔 수 있어서(포트·허브가 바뀌거나 가상 모니터)
+/// ID 대신 제조사·모델·일련번호로 «돌아온 모니터»를 찾는다.
+struct Fingerprint: Equatable { let vendor: UInt32, model: UInt32, serial: UInt32 }
+func fingerprint(_ id: UInt32) -> Fingerprint {
+  Fingerprint(vendor: CGDisplayVendorNumber(id), model: CGDisplayModelNumber(id), serial: CGDisplaySerialNumber(id))
+}
+
 /// 화면의 실제 픽셀 크기(레티나 포함). SCDisplay.width 는 포인트 단위라 그대로 쓰면 흐려진다.
 func pixelSize(_ d: SCDisplay) -> (Int, Int) {
   if let m = CGDisplayCopyDisplayMode(d.displayID), m.pixelWidth > 0 { return (m.pixelWidth, m.pixelHeight) }
   return (d.width, d.height)
 }
-
 func scaledSize(_ w: Int, _ h: Int, _ targetW: Int) -> (Int, Int) {
   let tw = targetW > 0 && targetW < w ? targetW : w
   let th = Int((Double(h) * Double(tw) / Double(w)).rounded(.down))
   return (tw & ~1, th & ~1)
 }
 
-/// 다중 모니터의 나머지 화면 — 영상만 담는다. 레코더 프로세스를 화면마다 띄우면 SCK 가 서로를 끊으므로
-/// 한 프로세스 안에서 스트림을 여러 개 연다.
-final class ExtraStream: NSObject, SCStreamDelegate, SCStreamOutput {
-  let displayID: UInt32
-  let path: String
-  var stream: SCStream?
-  var writer: AVAssetWriter?
-  var input: AVAssetWriterInput?
-  var started = false
-  var finishing = false
-  let q = DispatchQueue(label: "capture.extra")
+// MARK: - 기록(상태 파일의 events)
 
-  init(_ id: UInt32, _ path: String) { displayID = id; self.path = path }
-
-  func start(_ content: SCShareableContent) async throws {
-    guard let d = content.displays.first(where: { $0.displayID == displayID }) else { log("extra \(displayID) 없음"); return }
-    let cfg = SCStreamConfiguration()
-    let (pw, ph) = pixelSize(d)
-    (cfg.width, cfg.height) = scaledSize(pw, ph, scaleWidth)
-    cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-    cfg.queueDepth = 8
-    cfg.showsCursor = true
-    try? FileManager.default.removeItem(atPath: path)
-    let w = try AVAssetWriter(outputURL: URL(fileURLWithPath: path), fileType: .mp4)
-    let inp = AVAssetWriterInput(mediaType: .video, outputSettings: [
-      AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: cfg.width, AVVideoHeightKey: cfg.height])
-    inp.expectsMediaDataInRealTime = true
-    w.add(inp); writer = w; input = inp
-    stream = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: self)
-    try stream!.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
-    try await stream!.startCapture()
-    log("extra display=\(displayID) \(cfg.width)x\(cfg.height) → \(path)")
-  }
-
-  func stream(_ s: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
-    guard type == .screen, !finishing, CMSampleBufferDataIsReady(sb), let w = writer, let inp = input else { return }
-    if let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
-       let raw = arr.first?[.status] as? Int, let st = SCFrameStatus(rawValue: raw), st != .complete { return }
-    if !started { w.startWriting(); w.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sb)); started = true }
-    if inp.isReadyForMoreMediaData { inp.append(sb) }
-  }
-
-  func stream(_ s: SCStream, didStopWithError error: Error) { log("extra \(displayID) stopped: \(error)") }
-
-  func finalize() async {
-    finishing = true
-    try? await stream?.stopCapture()
-    guard let w = writer, w.status == .writing else { return }
-    input?.markAsFinished()
-    await w.finishWriting()
-  }
+let iso = ISO8601DateFormatter()
+let eventsLock = NSLock()
+var events: [[String: Any]] = []
+func eventSnapshot() -> [[String: Any]] { eventsLock.lock(); defer { eventsLock.unlock() }; return events }
+func event(_ type: String, _ display: UInt32?, _ detail: String = "") {
+  var e: [String: Any] = ["at": iso.string(from: Date()), "type": type]
+  if let d = display { e["display"] = Int(d); e["name"] = displayName(d) }
+  if !detail.isEmpty { e["detail"] = detail }
+  eventsLock.lock(); events.append(e); eventsLock.unlock()
+  log("event \(type) display=\(display.map(String.init) ?? "-") \(detail)")
 }
 
-final class Recorder: NSObject, SCStreamDelegate, SCStreamOutput {
-  var extras: [ExtraStream] = []
-  var stream: SCStream?
-  var writer: AVAssetWriter!
-  var vInput: AVAssetWriterInput?
-  var sysInput: AVAssetWriterInput?
-  var micInput: AVAssetWriterInput?
-  var started = false
+// MARK: - 공통 시간축
+
+/// 모든 파일이 같은 시각에서 시작하고 같은 시각에 끝나게 한다.
+/// 나중에 연결된 화면의 파일도 앞부분이 비어 있을 뿐 시간축은 주 녹화와 같다 → 합본이 어긋나지 않는다.
+final class Timeline {
+  private let lock = NSLock()
+  private var _start: CMTime? = nil
+  private var _latest = CMTime.invalid
+  var start: CMTime? { lock.lock(); defer { lock.unlock() }; return _start }
+  func startIfNil(_ t: CMTime) -> CMTime { lock.lock(); defer { lock.unlock() }; if _start == nil { _start = t }; return _start! }
+  func bump(_ t: CMTime) { lock.lock(); if !_latest.isValid || t > _latest { _latest = t }; lock.unlock() }
+  var latest: CMTime? { lock.lock(); defer { lock.unlock() }; return _latest.isValid ? _latest : nil }
+}
+let timeline = Timeline()
+
+// MARK: - 화면 하나의 녹화
+
+/// 주 녹화(primary): 소리를 함께 담는다. 대상 화면이 사라지면 남은 화면으로 옮겨 같은 파일에 이어 쓰고,
+///   대상 화면이 돌아오면 다시 돌아간다.
+/// 추가 화면(extra): 영상만. 화면이 빠지면 멈췄다가 다시 꽂으면 같은 파일에 이어 쓴다.
+final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
+  enum Role { case primary, extra }
+  let role: Role
+  var targetID: UInt32?          // nil = 자동(내장 화면 우선). 같은 모니터가 새 ID 로 돌아오면 바뀐다
+  let targetFP: Fingerprint?
+  let path: String
+  let canFallback: Bool
+  private(set) var writer: AVAssetWriter?
+  private var vInput: AVAssetWriterInput?
+  private var sysInput: AVAssetWriterInput?
+  private var micInput: AVAssetWriterInput?
+  private var outW = 0, outH = 0
+  private var writing = false
+  private(set) var appended = 0
   var finishing = false
-  let q = DispatchQueue(label: "capture.samples")
+  private let lock = NSLock()
+  private var _stream: SCStream?
+  private var _currentID: UInt32?
+  var lastError = ""
+  let q: DispatchQueue
 
-  func start() async throws {
-    let content: SCShareableContent
-    do {
-      content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-    } catch {
-      throw NSError(domain: "capture", code: 2, userInfo: [NSLocalizedDescriptionKey:
-        "화면 기록 권한이 없습니다. 시스템 설정 → 개인정보 보호 및 보안 → 화면 및 시스템 오디오 녹음에서 MacRecorder Capture 를 켜 주세요. (\(error.localizedDescription))"])
-    }
-    guard !content.displays.isEmpty else {
-      throw NSError(domain: "capture", code: 2, userInfo: [NSLocalizedDescriptionKey: "화면을 찾지 못했습니다(화면 기록 권한 확인)."])
-    }
-    let display = displayID.flatMap { id in content.displays.first { $0.displayID == id } }
-      ?? content.displays.first { $0.displayID == CGMainDisplayID() } ?? content.displays[0]
+  var stream: SCStream? { lock.lock(); defer { lock.unlock() }; return _stream }
+  var currentID: UInt32? { lock.lock(); defer { lock.unlock() }; return _currentID }
+  private func setActive(_ s: SCStream?, _ id: UInt32?) { lock.lock(); _stream = s; _currentID = id; lock.unlock() }
+  private func isActive(_ s: SCStream) -> Bool { lock.lock(); defer { lock.unlock() }; return _stream === s }
+  var file: String { (path as NSString).lastPathComponent }
 
-    let cfg = SCStreamConfiguration()
-    if wantVideo {
-      // 실제 픽셀 크기에서 --width 로 줄인다(0 이면 원본)
-      let (pw, ph) = pixelSize(display)
-      (cfg.width, cfg.height) = scaledSize(pw, ph, scaleWidth)
-      cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-    } else {
-      // 오디오 전용도 시스템 소리를 받으려면 디스플레이 스트림이 필요하다 → 아주 작게·느리게 받고 버린다
-      (cfg.width, cfg.height) = scaledSize(display.width, display.height, 320)
-      cfg.minimumFrameInterval = CMTime(value: 1, timescale: 2)
-    }
-    cfg.queueDepth = 8
-    cfg.showsCursor = true
-    if wantSystem { cfg.capturesAudio = true; cfg.sampleRate = 48000; cfg.channelCount = 2; cfg.excludesCurrentProcessAudio = true }
-    if wantMic {
-      cfg.captureMicrophone = true
-      if let m = micDeviceID { cfg.microphoneCaptureDeviceID = m }
-    }
+  init(_ role: Role, target: UInt32?, path: String, fallback: Bool) {
+    self.role = role; targetID = target; self.path = path; canFallback = fallback
+    targetFP = target.map(fingerprint)
+    if let t = target { rememberName(t) }
+    q = DispatchQueue(label: "capture.\(role == .primary ? "primary" : "extra").\(target ?? 0)")
+  }
 
-    try? FileManager.default.removeItem(atPath: outPath)
-    writer = try AVAssetWriter(outputURL: URL(fileURLWithPath: outPath), fileType: wantVideo ? .mp4 : .m4a)
-    if wantVideo {
+  /// 녹화할 화면 고르기: 대상 화면 → (옮기기 허용 시) 내장 화면 → 주 디스플레이 → 아무 화면
+  func pick(_ ds: [SCDisplay]) -> SCDisplay? {
+    if let t = targetID, let d = ds.first(where: { $0.displayID == t }) { return d }
+    if targetID != nil && !canFallback { return nil }
+    return ds.first { isBuiltin($0.displayID) } ?? ds.first { $0.displayID == CGMainDisplayID() } ?? ds.first
+  }
+
+  private func makeWriter(_ d: SCDisplay) throws {
+    guard writer == nil else { return }
+    let video = wantVideo
+    if video { let (pw, ph) = pixelSize(d); (outW, outH) = scaledSize(pw, ph, scaleWidth) }
+    try? FileManager.default.removeItem(atPath: path)
+    let w = try AVAssetWriter(outputURL: URL(fileURLWithPath: path), fileType: video ? .mp4 : .m4a)
+    if video {
       let v = AVAssetWriterInput(mediaType: .video, outputSettings: [
-        AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: cfg.width, AVVideoHeightKey: cfg.height])
+        AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: outW, AVVideoHeightKey: outH])
       v.expectsMediaDataInRealTime = true
-      writer.add(v); vInput = v
+      w.add(v); vInput = v
     }
-    if wantSystem {
+    if role == .primary && wantSystem {
       let a = AVAssetWriterInput(mediaType: .audio, outputSettings: [
         AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 2, AVEncoderBitRateKey: 160000])
       a.expectsMediaDataInRealTime = true
-      writer.add(a); sysInput = a
+      w.add(a); sysInput = a
     }
-    if wantMic {
+    if role == .primary && wantMic {
       let a = AVAssetWriterInput(mediaType: .audio, outputSettings: [
         AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 128000])
       a.expectsMediaDataInRealTime = true
-      writer.add(a); micInput = a
+      w.add(a); micInput = a
     }
+    writer = w
+  }
 
-    stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: cfg, delegate: self)
-    try stream!.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
-    if wantSystem { try stream!.addStreamOutput(self, type: .audio, sampleHandlerQueue: q) }
-    if wantMic { try stream!.addStreamOutput(self, type: .microphone, sampleHandlerQueue: q) }
-    try await stream!.startCapture()
-    log("recording display=\(display.displayID) \(cfg.width)x\(cfg.height) video=\(wantVideo) system=\(wantSystem) mic=\(wantMic) → \(outPath)")
-    for (id, p) in extraSpecs where wantVideo {
-      let e = ExtraStream(id, p)
-      do { try await e.start(content); extras.append(e) } catch { log("extra \(id) error: \(error)") }
+  /// 스트림 연결. 실패하면 false(대상 화면이 없거나 권한 문제) — 감시자가 나중에 다시 시도한다.
+  func connect() async -> Bool {
+    guard !finishing else { return false }
+    if stream != nil { return true }
+    let content: SCShareableContent
+    do { content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) }
+    catch { lastError = "화면 기록 권한이 없습니다. 시스템 설정 → 개인정보 보호 및 보안 → 화면 및 시스템 오디오 녹음에서 MacRecorder Capture 를 켜 주세요. (\(error.localizedDescription))"; return false }
+    guard let d = pick(content.displays) else { lastError = "녹화할 화면이 없습니다"; return false }
+    do {
+      try makeWriter(d)
+      let cfg = SCStreamConfiguration()
+      if wantVideo {
+        cfg.width = outW; cfg.height = outH
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        // 다른 크기의 화면으로 옮겨도 같은 파일 크기에 맞춰 넣는다(비율 유지, 남는 곳은 검정)
+        cfg.scalesToFit = true
+        cfg.preservesAspectRatio = true
+      } else {
+        // 소리만 녹음해도 시스템 소리를 받으려면 화면 스트림이 필요하다 → 아주 작게·느리게 받고 버린다
+        let (w, h) = scaledSize(d.width, d.height, 320); cfg.width = w; cfg.height = h
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: 2)
+      }
+      cfg.queueDepth = 8
+      cfg.showsCursor = true
+      if role == .primary && wantSystem { cfg.capturesAudio = true; cfg.sampleRate = 48000; cfg.channelCount = 2; cfg.excludesCurrentProcessAudio = true }
+      if role == .primary && wantMic { cfg.captureMicrophone = true; if let m = micDeviceID { cfg.microphoneCaptureDeviceID = m } }
+      let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: self)
+      try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
+      if role == .primary && wantSystem { try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: q) }
+      if role == .primary && wantMic { try s.addStreamOutput(self, type: .microphone, sampleHandlerQueue: q) }
+      setActive(s, d.displayID)
+      rememberName(d.displayID)
+      do { try await s.startCapture() } catch { setActive(nil, nil); throw error }
+      log("\(role == .primary ? "primary" : "extra") → display \(d.displayID) \(cfg.width)x\(cfg.height) file=\(file)")
+      return true
+    } catch {
+      lastError = error.localizedDescription
+      log("connect error (\(file)): \(error.localizedDescription)")
+      return false
     }
-    writeStatus("recording", ["display": Int(display.displayID)])
+  }
+
+  func disconnect() async {
+    guard let s = stream else { return }
+    setActive(nil, nil)
+    try? await s.stopCapture()
   }
 
   func stream(_ s: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
-    guard !finishing, CMSampleBufferDataIsReady(sb) else { return }
+    guard !finishing, isActive(s), CMSampleBufferDataIsReady(sb), let w = writer else { return }
     if type == .screen {
       if let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
          let raw = arr.first?[.status] as? Int, let st = SCFrameStatus(rawValue: raw), st != .complete { return }
     }
-    if !started {
-      // 시작 기준: 영상 모드는 첫 화면 프레임, 오디오 모드는 첫 오디오 버퍼
-      let trigger = wantVideo ? (type == .screen) : (type == .audio || type == .microphone)
-      guard trigger else { return }
-      writer.startWriting()
-      writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sb))
-      started = true
+    let pts = CMSampleBufferGetPresentationTimeStamp(sb)
+    if !writing {
+      if role == .primary {
+        // 시작 기준: 영상 모드는 첫 화면 프레임, 소리 모드는 첫 오디오
+        let trigger = wantVideo ? (type == .screen) : (type == .audio || type == .microphone)
+        guard trigger else { return }
+        let start = timeline.startIfNil(pts)
+        w.startWriting(); w.startSession(atSourceTime: start)
+      } else {
+        // 추가 화면은 주 녹화의 시작 시각을 기준으로 삼는다(앞부분은 비어 있어도 시간축이 같다)
+        guard type == .screen, let start = timeline.start, pts >= start else { return }
+        w.startWriting(); w.startSession(atSourceTime: start)
+      }
+      writing = true
     }
+    guard w.status == .writing else { return }
+    var ok = false
     switch type {
-    case .screen: if let v = vInput, v.isReadyForMoreMediaData { v.append(sb) }
-    case .audio: if let a = sysInput, a.isReadyForMoreMediaData { a.append(sb) }
-    case .microphone: if let a = micInput, a.isReadyForMoreMediaData { a.append(sb) }
+    case .screen: if let v = vInput, v.isReadyForMoreMediaData { ok = v.append(sb) }
+    case .audio: if let a = sysInput, a.isReadyForMoreMediaData { ok = a.append(sb) }
+    case .microphone: if let a = micInput, a.isReadyForMoreMediaData { ok = a.append(sb) }
     @unknown default: break
     }
+    if ok { appended += 1; timeline.bump(pts) }
   }
 
   func stream(_ s: SCStream, didStopWithError error: Error) {
-    // 잠자기·덮개 닫힘으로 화면이 사라지면 SCK 가 스트림을 끊는다. 여기서도 반드시 파일을 마무리해야
-    // moov 아톰이 써져 재생 가능한 파일이 남는다.
-    log("stream stopped: \(error.localizedDescription)")
-    finish(reason: "stream-stopped: \(error.localizedDescription)")
+    // 화면이 빠지거나(-3815 등) 잠자기로 스트림이 끊겼다. 녹화를 끝내지 않고 감시자에게 맡긴다.
+    guard isActive(s) else { return }
+    let was = currentID
+    setActive(nil, nil)
+    event(role == .primary ? "primary-lost" : "display-lost", was, error.localizedDescription)
+    DispatchQueue.main.async { supervisor.kick() }
   }
 
-  func finish(reason: String = "stopped") {
-    if finishing { return }
-    finishing = true
-    writeStatus("finishing", ["reason": reason])
-    q.async {
-      Task {
-        try? await self.stream?.stopCapture()
-        for e in self.extras { await e.finalize() }
-        // 첫 프레임 전에 멈추면 writer 가 시작 전이라 markAsFinished 가 예외를 낸다 → writing 일 때만
-        if self.writer?.status == .writing {
-          self.vInput?.markAsFinished(); self.sysInput?.markAsFinished(); self.micInput?.markAsFinished()
-          await self.writer.finishWriting()
-        }
-        let ok = self.writer?.status == .completed
-        log("finished ok=\(ok) reason=\(reason)")
-        if ok { spawnMixer(outPath) }
-        writeStatus(ok ? "finished" : "failed", ok ? ["reason": reason] : ["error": "녹화 파일을 만들지 못했습니다(녹화가 시작되기 전에 멈췄을 수 있음).", "reason": reason])
-        exit(ok ? 0 : 1)
-      }
+  /// 파일 마무리. 모든 파일의 끝을 같은 시각으로 맞춘다(빠진 화면은 마지막 장면이 끝까지 유지된다).
+  func finalize(end: CMTime?) async -> Bool {
+    guard let w = writer else { return false }
+    guard writing, w.status == .writing else {
+      w.cancelWriting(); try? FileManager.default.removeItem(atPath: path); return false
     }
+    vInput?.markAsFinished(); sysInput?.markAsFinished(); micInput?.markAsFinished()
+    if let e = end { w.endSession(atSourceTime: e) }
+    await w.finishWriting()
+    log("finalized \(file) status=\(w.status.rawValue) samples=\(appended)")
+    return w.status == .completed
   }
 }
 
-statusBase = ["out": outPath, "startedAt": ISO8601DateFormatter().string(from: Date()),
-              "video": wantVideo, "mic": wantMic, "system": wantSystem]
+// MARK: - 감시자: 화면 변화에 맞춰 연결을 고친다
+
+final class Supervisor {
+  var captures: [Capture] = []
+  var primary: Capture { captures[0] }
+  var finishing = false
+  private var busy = false
+  private var again = false
+
+  func kick() {
+    guard !finishing else { return }
+    if busy { again = true; return }
+    busy = true
+    Task { @MainActor in
+      repeat { again = false; await self.tick() } while again && !finishing
+      busy = false
+      writeLive()
+    }
+  }
+
+  @MainActor func tick() async {
+    let online = Set(onlineDisplayIDs())
+    for id in online { rememberName(id) }
+    refreshNames(online)
+    // 0) 대상 모니터가 다른 화면 ID 로 돌아왔으면(제조사·모델·일련번호가 같음) 그 ID 로 대상을 바꾼다
+    for c in captures where !c.finishing {
+      guard let t = c.targetID, !online.contains(t), let fp = c.targetFP else { continue }
+      let claimed = Set(captures.compactMap { $0.targetID })
+      if let id = online.sorted().first(where: { !claimed.contains($0) && fingerprint($0) == fp }) {
+        log("display \(t) returned as \(id)")
+        if let n = displayNames[t] { realNames.remove(id); displayNames[id] = n; realNames.insert(id) }
+        c.targetID = id
+      }
+    }
+    for c in captures where !c.finishing {
+      // 1) 연결된 화면이 목록에서 빠졌으면 먼저 끊는다(스트림 오류보다 화면 변경 알림이 빨리 올 때가 있다)
+      if let cur = c.currentID, !online.contains(cur) {
+        await c.disconnect()
+        event(c.role == .primary ? "primary-lost" : "display-lost", cur, "화면 연결 해제")
+      }
+      if c.stream == nil {
+        // 2) 끊겨 있으면 다시 연결. 추가 화면은 자기 화면이 돌아왔을 때만
+        if c.role == .extra, let t = c.targetID, !online.contains(t) { continue }
+        if await c.connect(), let now = c.currentID {
+          if c.role == .primary {
+            event(c.targetID == nil || now == c.targetID ? "primary-resumed" : "primary-moved", now)
+          } else { event("display-resumed", now) }
+        }
+      } else if c.role == .primary, let t = c.targetID, let cur = c.currentID, cur != t, online.contains(t) {
+        // 3) 주 녹화가 다른 화면으로 옮겨 가 있는데 원래 화면이 돌아왔으면 되돌린다
+        await c.disconnect()
+        if await c.connect(), let now = c.currentID { event("primary-returned", now) }
+      }
+    }
+    // 4) «전체 화면» 녹화 중 새로 꽂은 화면은 녹화에 더한다
+    if allDisplays && wantVideo {
+      let known = Set(captures.compactMap { $0.targetID })
+      for id in online.sorted() where !known.contains(id) && id != primary.currentID {
+        var name = "display-\(id).mp4", k = 2
+        while FileManager.default.fileExists(atPath: (outDir as NSString).appendingPathComponent(name)) { name = "display-\(id)-\(k).mp4"; k += 1 }
+        let c = Capture(.extra, target: id, path: (outDir as NSString).appendingPathComponent(name), fallback: false)
+        captures.append(c)
+        if await c.connect() { event("display-added", id) }
+      }
+    }
+  }
+
+  func writeLive() {
+    let ev = eventSnapshot()
+    let files: [[String: Any]] = captures.map { c in
+      var o: [String: Any] = ["file": c.file, "role": c.role == .primary ? "primary" : "extra", "recording": c.stream != nil]
+      if let t = c.targetID { o["display"] = Int(t); o["name"] = displayName(t); o["x"] = Int(CGDisplayBounds(t).origin.x) }
+      if let cur = c.currentID { o["current"] = Int(cur) }
+      return o
+    }
+    writeStatus(finishing ? "finishing" : "recording", ["events": ev, "files": files])
+  }
+
+  func finish(reason: String) {
+    if finishing { return }
+    finishing = true
+    for c in captures { c.finishing = true }
+    writeStatus("finishing", ["reason": reason])
+    Task {
+      for c in self.captures { await c.disconnect() }
+      let end = timeline.latest
+      var results: [String: Bool] = [:]
+      for c in self.captures { results[c.file] = await c.finalize(end: end) }
+      let ok = results[self.primary.file] == true
+      log("finished ok=\(ok) reason=\(reason)")
+      if ok { spawnMixer(outPath) }
+      let ev = eventSnapshot()
+      let files: [[String: Any]] = self.captures.filter { results[$0.file] == true }.map { c in
+        var o: [String: Any] = ["file": c.file, "role": c.role == .primary ? "primary" : "extra"]
+        if let t = c.targetID { o["display"] = Int(t); o["name"] = displayName(t); o["x"] = Int(CGDisplayBounds(t).origin.x) }
+        return o
+      }
+      writeStatus(ok ? "finished" : "failed", ok
+        ? ["reason": reason, "events": ev, "files": files]
+        : ["error": "녹화 파일을 만들지 못했습니다(녹화가 시작되기 전에 멈췄을 수 있음).", "reason": reason, "events": ev])
+      exit(ok ? 0 : 1)
+    }
+  }
+}
+let supervisor = Supervisor()
+
+// MARK: - 시작
+
+statusBase = ["out": outPath, "startedAt": iso.string(from: Date()), "video": wantVideo, "mic": wantMic, "system": wantSystem]
 writeStatus("starting")
-let rec = Recorder()
+
+// 주 녹화 대상: 화면을 지정했으면 그 화면, «전체 화면»이면 가장 빠지지 않는 내장 화면(없으면 주 디스플레이).
+// 이전에는 «주 디스플레이»(대개 외장 모니터)에 소리를 실어서, HDMI 를 빼면 녹화 전체가 끝났다.
+let online0 = onlineDisplayIDs()
+var primaryTarget: UInt32? = displayID
+if displayID == nil && wantVideo {
+  primaryTarget = online0.first(where: isBuiltin) ?? (online0.contains(CGMainDisplayID()) ? CGMainDisplayID() : online0.first)
+}
+for id in online0 { _ = displayName(id) }
+supervisor.captures.append(Capture(.primary, target: primaryTarget, path: outPath, fallback: fallback))
+if allDisplays && wantVideo {
+  for id in online0 where id != primaryTarget {
+    supervisor.captures.append(Capture(.extra, target: id, path: (outDir as NSString).appendingPathComponent("display-\(id).mp4"), fallback: false))
+  }
+}
+
 var signalSources: [DispatchSourceSignal] = []
 for sig in [SIGINT, SIGTERM, SIGHUP] {
   signal(sig, SIG_IGN)
   let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-  src.setEventHandler { rec.finish(reason: "signal \(sig)") }
+  src.setEventHandler { supervisor.finish(reason: "signal \(sig)") }
   src.resume()
   signalSources.append(src)
 }
-Task {
-  do { try await rec.start() } catch {
-    log("start error: \(error.localizedDescription)")
-    writeStatus("failed", ["error": error.localizedDescription])
+
+// 1초마다 화면 구성을 점검한다(꽂기·빼기·덮개·잠자기에서 깨어남).
+// macOS 의 화면 변경 알림(CGDisplayRegisterReconfigurationCallback)은 이 백그라운드 프로세스에 오지 않아(실측) 쓰지 않는다.
+// 점검 자체는 화면 ID 목록 비교라 가볍다. 끊긴 스트림이 있을 때만 다시 연결을 시도한다.
+let ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in supervisor.kick() }
+
+Task { @MainActor in
+  let p = supervisor.primary
+  guard await p.connect() else {
+    log("start error: \(p.lastError)")
+    writeStatus("failed", ["error": p.lastError])
     exit(2)
   }
+  event("start", p.currentID)
+  for c in supervisor.captures.dropFirst() { if await c.connect() { event("start", c.currentID) } }
+  supervisor.writeLive()
 }
 RunLoop.main.run()

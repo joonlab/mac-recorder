@@ -67,11 +67,15 @@ async function finalize() {
     const mixed = media.replace(/(\.[^.]+)$/, '_mixed$1');
     for (let i = 0; i < 240 && !fs.existsSync(mixed); i++) await sleep(500);
   }
-  // 3) 여러 화면 → 나란히 합본
-  if ((s.extras || []).length) {
+  // 3) 녹화 엔진이 남긴 파일 목록·화면 변화 기록을 세션에 옮긴다
+  const files = (cap.files || []).filter((f) => fs.existsSync(path.join(dir, f.file)));
+  const extras = files.filter((f) => f.role === 'extra').map((f) => f.file);
+  const captureEvents = (cap.events || []).filter((e) => e.type !== 'start');
+  updateSession(id, { extras, captureEvents, displays: files });
+  // 4) 여러 화면 → 실제 모니터 배치(왼쪽→오른쪽) 순서로 나란히 합본
+  if (extras.length) {
     setJob({ step: '여러 화면 합치는 중' });
-    try { await run('/bin/bash', [path.join(REPO, 'scripts', 'stack-displays.sh'), dir], { timeout: 6 * 3600_000 }); }
-    catch (e) { log('stack 실패', e.message); }
+    try { await stackDisplays(dir, files, s); } catch (e) { log('합본 실패', e.message); }
   }
   const info = await probe(media);
   updateSession(id, { status: 'ready', durationSec: Math.round(info.durationSec), audioTracks: info.audioTracks.length });
@@ -80,6 +84,35 @@ async function finalize() {
 }
 
 let current = null; // 실패 시 어느 항목에 오류를 적을지
+/** 화면별 파일을 가로로 이어 붙인다. 모든 파일은 같은 시간축이라(엔진이 시작 시각을 맞춤),
+ *  나중에 연결된 화면은 앞부분이 비어 있다 → 그만큼 검정 화면으로 채운다. */
+async function stackDisplays(dir, files, s) {
+  const order = [...files].sort((a, b) => (a.x ?? 0) - (b.x ?? 0));
+  const meta = [];
+  for (const f of order) {
+    const { stdout } = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=height,start_time',
+      '-of', 'json', path.join(dir, f.file)], { timeout: 30000 });
+    const st = JSON.parse(stdout).streams?.[0] || {};
+    meta.push({ file: f.file, h: Number(st.height) || 0, start: Math.max(0, Number(st.start_time) || 0) });
+  }
+  const H = Math.max(...meta.map((m) => m.h)) & ~1;
+  if (!H) throw new Error('영상 높이를 읽지 못함');
+  const mixed = s.media.replace(/(\.[^.]+)$/, '_mixed$1');
+  const audioSrc = fs.existsSync(path.join(dir, mixed)) ? mixed : s.media;
+  const args = ['-hide_banner', '-loglevel', 'error', '-y'];
+  meta.forEach((m) => args.push('-i', path.join(dir, m.file)));
+  args.push('-i', path.join(dir, audioSrc));
+  const fc = meta.map((m, i) => `[${i}:v]setpts=PTS-STARTPTS,scale=-2:${H},setsar=1${m.start > 0.05 ? `,tpad=start_duration=${m.start.toFixed(3)}:start_mode=add:color=black` : ''}[v${i}]`).join(';')
+    + `;${meta.map((_, i) => `[v${i}]`).join('')}hstack=inputs=${meta.length}[v]`;
+  const out = path.join(dir, 'recording_all.mp4');
+  const base = [...args, '-filter_complex', fc, '-map', '[v]', '-map', `${meta.length}:a:0?`];
+  const tail = ['-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-f', 'mp4', `${out}.part`];
+  try { await run('ffmpeg', [...base, '-c:v', 'h264_videotoolbox', '-b:v', '8M', ...tail], { timeout: 6 * 3600_000 }); }
+  catch { await run('ffmpeg', [...base, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', ...tail], { timeout: 6 * 3600_000 }); }
+  fs.renameSync(`${out}.part`, out);
+  log(`stacked ${meta.map((m) => `${m.file}@${m.start.toFixed(1)}s`).join(' + ')} → recording_all.mp4`);
+}
+
 async function stepTranscribe() {
   current = 'transcript';
   setPart('transcript', { status: 'running', error: null });

@@ -107,7 +107,7 @@ export function getActive() {
   if (alive(a.pid)) {
     let cap = null;
     try { cap = JSON.parse(fs.readFileSync(path.join(sessionDir(a.id), 'capture.json'), 'utf8')); } catch {}
-    return { ...a, state: cap?.state || 'starting', error: cap?.error || null };
+    return { ...a, state: cap?.state || 'starting', error: cap?.error || null, events: (cap?.events || []).filter((e) => e.type !== 'start').slice(-5) };
   }
   // 프로세스가 사라졌다 = 잠자기·오류·외부 종료로 끝남 → 마무리 잡을 띄우고 진행 중 표시를 지운다
   try { fs.rmSync(P.active, { force: true }); } catch {}
@@ -137,25 +137,17 @@ export async function startRecording(opts = {}) {
     '--status-file', path.join(dir, 'capture.json'), '--mix-script', path.join(REPO, 'scripts', 'mix-audio.sh')];
   if (mic && r.micId) args.push('--mic-id', r.micId);
 
-  // 화면 선택: 'all' + 모니터 2개 이상이면 주 화면(소리 포함) + 나머지 화면(영상만)을 한 캡처 프로세스에서 동시에
-  let extras = [];
+  // 화면 선택: «전체 화면»은 녹화 엔진이 직접 고른다(소리는 내장 화면에 싣고, 나머지 화면은 따로, 녹화 중 꽂은 화면도 추가).
+  // 특정 화면이면 그 화면을 녹화하다가 빠지면 남은 화면으로 옮겨 이어 쓰고, 돌아오면 다시 돌아간다.
   if (video) {
-    let displays = [];
-    try { displays = (await devices()).displays || []; } catch {}
-    if (r.display && r.display !== 'all') {
-      args.push('--display-id', String(r.display));
-    } else if (displays.length >= 2) {
-      const main = displays.find((d) => d.main) || displays[0];
-      args.push('--display-id', String(main.id));
-      extras = displays.filter((d) => d !== main).map((d) => ({ id: d.id, file: `display-${d.id}.mp4` }));
-      for (const e of extras) args.push('--extra', `${e.id}:${path.join(dir, e.file)}`);
-    }
+    if (r.display && r.display !== 'all') args.push('--display-id', String(r.display));
+    else args.push('--displays', 'all');
   }
 
   const session = {
     id, title: opts.title || '', createdAt: new Date().toISOString(), stoppedAt: null,
     sources: { video, mic, system }, display: video ? (r.display || 'all') : null, micId: mic ? (r.micId || '') : null,
-    media, extras: extras.map((e) => e.file), status: 'recording',
+    media, extras: [], status: 'recording',
     transcript: { status: 'none' }, summary: { status: 'none' },
   };
   writeJSON(path.join(dir, 'session.json'), session);

@@ -13,6 +13,9 @@ import { probe } from './media.mjs';
 import { applyReplacements, isHallucination, loadGlossary, whisperPrompt } from './glossary.mjs';
 
 export const VAD_MODEL = 'ggml-silero-v5.1.2.bin';
+// 녹화 중 화면이 바뀌거나 잠자기로 소리가 잠깐 끊긴 구간을 무음으로 채운다.
+// 안 채우면 끊긴 뒤의 말이 그만큼 앞당겨져 전사 시각([MM:SS])이 실제 영상과 어긋난다.
+const GAPFILL = 'aresample=async=1:first_pts=0';
 
 export function findModel(name, minBytes = 1e6) {
   for (const d of [P.models, path.join(os.homedir(), '.whisper')]) {
@@ -85,7 +88,7 @@ export async function transcribeSession(session, dir, { onProgress } = {}) {
   try {
     if (cfg.transcribe.splitSpeakers && n >= 2) {
       for (let i = 0; i < n; i++) {
-        const wav = await extractWav(media, path.join(work, `track${i}.wav`), ['-map', `0:a:${i}`]);
+        const wav = await extractWav(media, path.join(work, `track${i}.wav`), ['-map', `0:a:${i}`, '-af', GAPFILL]);
         const segs = await runWhisper(wav, path.join(work, `track${i}`), {
           onProgress: (p) => onProgress?.(Math.round((i * 100 + p) / n)),
         });
@@ -94,8 +97,8 @@ export async function transcribeSession(session, dir, { onProgress } = {}) {
       raw.sort((a, b) => a.start - b.start);
     } else {
       const filter = n >= 2
-        ? ['-filter_complex', `${Array.from({ length: n }, (_, i) => `[0:a:${i}]`).join('')}amix=inputs=${n}:duration=longest:normalize=0[a]`, '-map', '[a]']
-        : ['-map', '0:a:0'];
+        ? ['-filter_complex', `${Array.from({ length: n }, (_, i) => `[0:a:${i}]${GAPFILL}[g${i}];`).join('')}${Array.from({ length: n }, (_, i) => `[g${i}]`).join('')}amix=inputs=${n}:duration=longest:normalize=0[a]`, '-map', '[a]']
+        : ['-map', '0:a:0', '-af', GAPFILL];
       const wav = await extractWav(media, path.join(work, 'mix.wav'), filter);
       raw = await runWhisper(wav, path.join(work, 'mix'), { onProgress });
     }

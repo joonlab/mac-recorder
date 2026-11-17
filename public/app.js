@@ -100,6 +100,8 @@ function renderControl() {
   btn.classList.toggle('on', !!a);
   btn.setAttribute('aria-label', a ? '녹화 정지' : '녹화 시작');
   $('#recTitle').textContent = a ? `녹화 중 ${hms(a.elapsedSec)}${a.state === 'starting' ? ' (시작 중…)' : ''}` : '녹화 준비됨';
+  const last = a?.events?.[a.events.length - 1];
+  if (last) $('#recTitle').insertAdjacentHTML('beforeend', `<div class="muted" style="font-size:13px;font-weight:400">${esc(evText(last, a.startedAt))}</div>`);
   const r = recOpts();
   for (const cb of $$('#srcChips input')) {
     if (document.activeElement !== cb) cb.checked = !!(a ? a.sources?.[cb.dataset.src] : r[cb.dataset.src]);
@@ -151,10 +153,32 @@ function jobTag(s) {
   if (s.status === 'failed') return '<span class="tag err">실패</span>';
   if (j && (j.status === 'running' || j.status === 'queued')) return `<span class="tag run">${esc(j.step || '처리 중')}${j.progress != null ? ` ${j.progress}%` : ''}</span>`;
   const t = [];
+  const moves = (s.captureEvents || []).filter((e) => /lost|added/.test(e.type)).length;
+  if (moves) t.push(`<span class="tag" title="녹화 중 모니터 연결이 바뀌었습니다">화면 변화 ${moves}</span>`);
   if (s.hasTranscript) t.push('<span class="tag ok">전사</span>');
   if (s.hasSummary) t.push('<span class="tag ok">요약</span>');
   if (j?.status === 'error') t.push('<span class="tag err">오류</span>');
   return t.join('');
+}
+// 녹화 중 화면 변화 기록(모니터 분리·연결) → 사람이 읽는 문장
+// «으로/로»: 받침이 있으면(ㄹ 받침 제외) «으로»
+function ro(n) {
+  const c = n.charCodeAt(n.length - 1);
+  if (c >= 0xac00 && c <= 0xd7a3) { const j = (c - 0xac00) % 28; return `${n}${j && j !== 8 ? '으로' : '로'}`; }
+  return `${n}로`;
+}
+const EV = {
+  'primary-lost': (n) => `${n} 연결이 끊김`,
+  'primary-moved': (n) => `${ro(n)} 옮겨 계속 녹화`,
+  'primary-returned': (n) => `${ro(n)} 돌아옴`,
+  'primary-resumed': (n) => `${n}에서 녹화 재개`,
+  'display-lost': (n) => `${n} 분리 — 이 화면만 일시정지, 녹화는 계속`,
+  'display-resumed': (n) => `${n} 다시 연결 — 이어서 녹화`,
+  'display-added': (n) => `${n} 새로 연결 — 녹화에 추가`,
+};
+function evText(e, startIso) {
+  const t = startIso ? hms((new Date(e.at) - new Date(startIso)) / 1000) : new Date(e.at).toLocaleTimeString('ko-KR');
+  return `${t} · ${(EV[e.type] || ((n) => `${e.type} ${n}`))(e.name || '화면')}`;
 }
 function icon(s) { return s.sources?.video ? '🖥' : '🎙'; }
 function srcText(s) {
@@ -276,6 +300,8 @@ function renderJob() {
     h = `<div class="job">${esc(j.step || '처리 중')}${j.progress != null ? ` · ${j.progress}%` : ''}<div class="bar"><i style="width:${j.progress ?? 15}%"></i></div></div>`;
   } else if (j?.status === 'error') h = `<div class="job" style="color:var(--accent)">처리 오류: ${esc(j.error)}</div>`;
   else if (s.status === 'failed') h = `<div class="job" style="color:var(--accent)">녹화 실패: ${esc(s.error || '')}</div>`;
+  const ev = s.captureEvents || [];
+  if (ev.length) h += `<details class="job"><summary>녹화 중 화면 변화 ${ev.length}건 (녹화는 끊기지 않았습니다)</summary>${ev.map((e) => `<div class="muted">${esc(evText(e, s.createdAt))}</div>`).join('')}</details>`;
   $('#dJob').innerHTML = h;
 }
 function renderTranscript() {
