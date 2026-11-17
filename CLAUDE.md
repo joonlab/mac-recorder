@@ -12,3 +12,4 @@
 - 무거운 작업(전사·AI)은 `server/job.mjs` 별도 프로세스에서 돈다. 웹서버 안에서 동기 실행하면 그동안 모든 요청이 멈춘다.
 - 녹화 엔진은 화면이 빠지거나 생겨도 녹화를 끝내지 않는다. 1초마다 화면 목록을 점검해 다시 연결한다(백그라운드 프로세스에는 macOS 화면 변경 알림이 오지 않고 NSScreen 목록도 갱신되지 않는다 — 이름은 `--list` 를 새 프로세스로 실행해 받는다).
 - 모니터 관련 수정 뒤에는 `test/hotplug/run.sh` 로 꽂기·빼기 시험을 돌린다(가상 모니터 사용, 녹화 3개가 생긴다).
+- 버전(VERSION)을 올리면 같은 이름의 GitHub 릴리스와 `MacRecorder-apps-v<버전>.zip`(`native/build.sh <폴더> --universal` 후 `ditto -c -k --norsrc`)을 함께 올린다. Command Line Tools 가 없는 맥은 이 zip 을 내려받아 설치한다.

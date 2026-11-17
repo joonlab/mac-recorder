@@ -52,6 +52,9 @@ if [ $REUSE = 1 ]; then
   fi
 fi
 
+# 시험 설치는 이 맥의 실제 설치를 건드리지 않는다: 자동 실행·메뉴바 등록을 끈다(--reuse 로 불러온 값보다 우선)
+[ $TEST_MODE = 1 ] && { MENUBAR=0; AUTOSTART=0; }
+
 B=$'\033[1m'; G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; N=$'\033[0m'
 step() { printf "\n${B}▶ %s${N}\n" "$*"; }
 ok()   { printf "  ${G}✓${N} %s\n" "$*"; }
@@ -139,7 +142,11 @@ else
     echo "$3" > "$HOME_DIR/.build-$2"
     ok "$APPS/$1.app"
   }
-  if [ $NEED_MENU = 1 ]; then pkill -x MacRecorder 2>/dev/null || true; place "MacRecorder" menubar "$MENU_HASH"; else ok "메뉴바 앱 최신"; fi
+  if [ $NEED_MENU = 1 ]; then
+    # 실행 중인 메뉴바 앱을 끄고 교체(시험 설치는 실제 메뉴바를 끄지 않는다)
+    [ $TEST_MODE = 0 ] && { pkill -x MacRecorder 2>/dev/null || true; }
+    place "MacRecorder" menubar "$MENU_HASH"
+  else ok "메뉴바 앱 최신"; fi
   if [ $NEED_CAP = 1 ]; then
     place "MacRecorder Capture" capture "$CAP_HASH"
     # 서명이 바뀐 앱은 예전 권한 항목이 남아 «켜도 안 되는» 상태가 된다 → 이 앱의 권한 기록만 지우고 새로 요청받는다
