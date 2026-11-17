@@ -100,7 +100,7 @@ macrec doctor                 # 설치·권한·서버 점검
 
 ### Raycast (선택)
 
-Raycast 를 쓰고 있다면 Raycast 설정 → Extensions → Script Commands → **Add Directories** 에서 저장소의 `raycast/` 폴더를 추가하세요. «녹화 시작/정지», «녹음 시작 (소리만)», «녹화 상태», «녹화 대시보드 열기», «녹화 폴더 열기» 명령이 생깁니다.
+Raycast 를 쓰고 있다면 Raycast 설정 → Extensions → Script Commands → **Add Directories** 에서 설치 위치(`macrec version` 으로 확인)의 `raycast/` 폴더를 추가하세요. «녹화 시작/정지», «녹음 시작 (소리만)», «녹화 상태», «녹화 대시보드 열기», «녹화 폴더 열기» 명령이 생깁니다.
 
 ## 전사·교정·요약
 
