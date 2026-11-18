@@ -107,7 +107,12 @@ export function getActive() {
   if (alive(a.pid)) {
     let cap = null;
     try { cap = JSON.parse(fs.readFileSync(path.join(sessionDir(a.id), 'capture.json'), 'utf8')); } catch {}
-    return { ...a, state: cap?.state || 'starting', error: cap?.error || null, events: (cap?.events || []).filter((e) => e.type !== 'start').slice(-5) };
+    // 진행 시간 = 지금까지 - 멈춰 있던 시간(일시정지 중이면 멈춘 순간까지)
+    const now = Date.now();
+    const pausedNow = cap?.paused && cap?.pausedSince ? now - new Date(cap.pausedSince).getTime() : 0;
+    const recordedSec = Math.max(0, Math.round((now - new Date(a.startedAt).getTime() - pausedNow) / 1000 - (cap?.pausedTotalSec || 0)));
+    return { ...a, state: cap?.state || 'starting', paused: !!cap?.paused, recordedSec, error: cap?.error || null,
+      events: (cap?.events || []).filter((e) => e.type !== 'start').slice(-5) };
   }
   // 프로세스가 사라졌다 = 잠자기·오류·외부 종료로 끝남 → 마무리 잡을 띄우고 진행 중 표시를 지운다
   try { fs.rmSync(P.active, { force: true }); } catch {}
@@ -183,6 +188,15 @@ export function stopRecording() {
   updateSession(a.id, { status: 'finishing', stoppedAt: new Date().toISOString() });
   spawnJob(a.id, 'finalize');
   return { id: a.id };
+}
+
+/** 일시정지·다시 시작 — 녹화 엔진에 신호를 보낸다(SIGUSR1 = 일시정지, SIGUSR2 = 다시 시작) */
+export function pauseRecording(want) {
+  const a = getActive();
+  if (!a) throw new Error('진행 중인 녹화가 없습니다.');
+  const pause = want === undefined ? !a.paused : !!want;
+  process.kill(a.pid, pause ? 'SIGUSR1' : 'SIGUSR2');
+  return { id: a.id, paused: pause };
 }
 
 export async function deleteSession(id) {

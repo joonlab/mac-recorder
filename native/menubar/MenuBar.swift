@@ -42,6 +42,7 @@ final class Model: ObservableObject {
   @Published var online = false
   @Published var recording = false
   @Published var starting = false
+  @Published var paused = false
   @Published var elapsed = 0
   @Published var video = true
   @Published var mic = true
@@ -74,8 +75,9 @@ final class Model: ObservableObject {
           recording = true
           elapsed = a["elapsedSec"] as? Int ?? 0
           starting = (a["state"] as? String) == "starting"
+          paused = a["paused"] as? Bool ?? false
           notice = Model.noticeText((a["events"] as? [[String: Any]])?.last)
-        } else { recording = false; elapsed = 0; starting = false; notice = nil }
+        } else { recording = false; elapsed = 0; starting = false; paused = false; notice = nil }
         if let r = s["record"] as? [String: Any] {
           video = r["video"] as? Bool ?? true; mic = r["mic"] as? Bool ?? true; system = r["system"] as? Bool ?? false
           display = (r["display"] as? String) ?? String(describing: r["display"] ?? "all")
@@ -154,6 +156,19 @@ final class Model: ObservableObject {
     }
   }
 
+  func togglePause() {
+    guard recording, !busy else { return }
+    busy = true
+    Task {
+      do {
+        let r = try await Api.call("pause", method: "POST", body: [:], timeout: 10)
+        NSSound(named: (r["paused"] as? Bool) == true ? "Bottle" : "Tink")?.play()
+      } catch { NSSound.beep() }
+      busy = false
+      poll()
+    }
+  }
+
   func setRecord(_ patch: [String: Any]) {
     Task { _ = try? await Api.call("config", method: "PUT", body: ["record": patch]); poll() }
   }
@@ -197,16 +212,21 @@ final class Model: ObservableObject {
 // MARK: - 전역 단축키 ⌃⌥⌘R
 
 final class HotKey {
-  static var onPress: (() -> Void)?
-  private var ref: EventHotKeyRef?
+  static var onPress: (() -> Void)?        // ⌃⌥⌘R 녹화 시작·정지
+  static var onPause: (() -> Void)?        // ⌃⌥⌘P 일시정지·다시 녹화
+  private var refs: [EventHotKeyRef?] = [nil, nil]
   init() {
     var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-    InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
-      DispatchQueue.main.async { HotKey.onPress?() }
+    InstallEventHandler(GetApplicationEventTarget(), { _, ev, _ in
+      var hk = EventHotKeyID()
+      GetEventParameter(ev, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
+                        MemoryLayout<EventHotKeyID>.size, nil, &hk)
+      DispatchQueue.main.async { if hk.id == 2 { HotKey.onPause?() } else { HotKey.onPress?() } }
       return noErr
     }, 1, &spec, nil, nil)
-    let id = EventHotKeyID(signature: OSType(0x4D52_4543), id: 1) // 'MREC'
-    RegisterEventHotKey(UInt32(kVK_ANSI_R), UInt32(cmdKey | optionKey | controlKey), id, GetApplicationEventTarget(), 0, &ref)
+    let mods = UInt32(cmdKey | optionKey | controlKey)
+    RegisterEventHotKey(UInt32(kVK_ANSI_R), mods, EventHotKeyID(signature: OSType(0x4D52_4543), id: 1), GetApplicationEventTarget(), 0, &refs[0])
+    RegisterEventHotKey(UInt32(kVK_ANSI_P), mods, EventHotKeyID(signature: OSType(0x4D52_4543), id: 2), GetApplicationEventTarget(), 0, &refs[1])
   }
 }
 
@@ -221,8 +241,9 @@ struct MenuContent: View {
       Button("서버 다시 시작") { m.restartServer() }
       Divider()
     } else if m.recording {
-      Text(m.starting ? "● 녹화 시작 중…" : "● 녹화 중 \(m.elapsedText) — \(m.sourcesText)")
-      if let n = m.notice { Text("↳ \(n)") }
+      Text(m.starting ? "● 녹화 시작 중…" : (m.paused ? "⏸ 일시정지 \(m.elapsedText) — 지금은 녹화되지 않음" : "● 녹화 중 \(m.elapsedText) — \(m.sourcesText)"))
+      if let n = m.notice, !m.paused { Text("↳ \(n)") }
+      Button(m.paused ? "다시 녹화" : "일시정지") { m.togglePause() }.keyboardShortcut("p", modifiers: [.control, .option, .command])
       Button("녹화 정지") { m.toggle() }.keyboardShortcut("r", modifiers: [.control, .option, .command])
       Divider()
     } else {
@@ -276,13 +297,13 @@ struct MacRecorderApp: App {
   var body: some Scene {
     MenuBarExtra {
       MenuContent().environmentObject(model)
-        .onAppear { HotKey.onPress = { [weak model] in model?.toggle() } }
+        .onAppear { HotKey.onPress = { [weak model] in model?.toggle() }; HotKey.onPause = { [weak model] in model?.togglePause() } }
     } label: {
       HStack(spacing: 3) {
-        Image(nsImage: IconArt.menuBar(recording: model.recording, pulse: model.elapsed % 2 == 1))
+        Image(nsImage: IconArt.menuBar(recording: model.recording, paused: model.paused, pulse: !model.paused && model.elapsed % 2 == 1))
         if model.recording { Text(model.elapsedText).monospacedDigit() }
       }
-      .task { HotKey.onPress = { [weak model] in model?.toggle() } }
+      .task { HotKey.onPress = { [weak model] in model?.toggle() }; HotKey.onPause = { [weak model] in model?.togglePause() } }
     }
     .menuBarExtraStyle(.menu)
   }

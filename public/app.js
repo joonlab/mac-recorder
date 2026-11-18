@@ -68,7 +68,7 @@ async function refreshStatus() {
     state.status = s;
     renderControl();
     const pill = $('#pill');
-    if (s.active) { pill.className = 'pill rec'; pill.textContent = `● 녹화 중 ${hms(s.active.elapsedSec)}`; }
+    if (s.active) { pill.className = s.active.paused ? 'pill' : 'pill rec'; pill.textContent = `${s.active.paused ? '⏸ 일시정지' : '● 녹화 중'} ${hms(s.active.elapsedSec)}`; }
     else { pill.className = 'pill'; pill.textContent = '대기 중'; }
     const b = $('#propBadge'); b.hidden = !s.proposals; b.textContent = s.proposals;
     renderBanners();
@@ -99,7 +99,11 @@ function renderControl() {
   const btn = $('#recBtn');
   btn.classList.toggle('on', !!a);
   btn.setAttribute('aria-label', a ? '녹화 정지' : '녹화 시작');
-  $('#recTitle').textContent = a ? `녹화 중 ${hms(a.elapsedSec)}${a.state === 'starting' ? ' (시작 중…)' : ''}` : '녹화 준비됨';
+  $('#recTitle').textContent = a ? `${a.paused ? '일시정지' : '녹화 중'} ${hms(a.elapsedSec)}${a.state === 'starting' ? ' (시작 중…)' : ''}` : '녹화 준비됨';
+  const pb = $('#pauseBtn');
+  pb.hidden = !a || a.state === 'starting';
+  pb.textContent = a?.paused ? '● 다시 녹화' : '⏸ 일시정지';
+  btn.classList.toggle('paused', !!a?.paused);
   const last = a?.events?.[a.events.length - 1];
   if (last) $('#recTitle').insertAdjacentHTML('beforeend', `<div class="muted" style="font-size:13px;font-weight:400">${esc(evText(last, a.startedAt))}</div>`);
   const r = recOpts();
@@ -111,7 +115,7 @@ function renderControl() {
   const parts = [];
   if (r.video) parts.push('화면을 영상(mp4)으로');
   if (r.mic || r.system) parts.push(`${[r.mic && '마이크', r.system && '시스템 소리'].filter(Boolean).join('와 ')}를 함께`);
-  $('#srcHint').textContent = a ? '메뉴바 아이콘이나 ⌃⌥⌘R 로도 멈출 수 있습니다.'
+  $('#srcHint').textContent = a ? (a.paused ? '일시정지 중에는 화면·소리를 전혀 녹화하지 않습니다. 다시 녹화하면 같은 파일에 이어집니다.' : '⌃⌥⌘P 로 일시정지, ⌃⌥⌘R 로 정지할 수 있습니다(메뉴바에서도).')
     : (r.video ? `${parts.join(' ')} 녹화합니다.` : `${[r.mic && '마이크', r.system && '시스템 소리'].filter(Boolean).join('와 ')}만 오디오(m4a)로 녹음합니다.`)
       + (r.system ? '' : ' 화상회의 상대 목소리도 남기려면 «시스템 소리»를 켜세요.');
 }
@@ -136,6 +140,11 @@ async function saveRecord(patch) {
 $$('#srcChips input').forEach((cb) => cb.addEventListener('change', () => saveRecord({ [cb.dataset.src]: cb.checked })));
 $('#selDisplay').addEventListener('change', (e) => saveRecord({ display: e.target.value }));
 $('#selMic').addEventListener('change', (e) => saveRecord({ micId: e.target.value }));
+$('#pauseBtn').addEventListener('click', async () => {
+  try { const r = await api('pause', { body: {} }); toast(r.paused ? '일시정지했습니다. 이 동안은 녹화되지 않습니다.' : '다시 녹화합니다.'); }
+  catch (e) { toast(e.message, 5000); }
+  refreshStatus();
+});
 $('#recBtn').addEventListener('click', async () => {
   const btn = $('#recBtn'); btn.disabled = true;
   try {
@@ -149,11 +158,13 @@ $('#recBtn').addEventListener('click', async () => {
 // ── 녹화 목록 ───────────────────────────────────────────────────
 function jobTag(s) {
   const j = s.job;
-  if (s.status === 'recording') return '<span class="tag err">● 녹화 중</span>';
+  if (s.status === 'recording') return state.status?.active?.id === s.id && state.status.active.paused ? '<span class="tag">⏸ 일시정지</span>' : '<span class="tag err">● 녹화 중</span>';
   if (s.status === 'failed') return '<span class="tag err">실패</span>';
   if (j && (j.status === 'running' || j.status === 'queued')) return `<span class="tag run">${esc(j.step || '처리 중')}${j.progress != null ? ` ${j.progress}%` : ''}</span>`;
   const t = [];
   const moves = (s.captureEvents || []).filter((e) => /lost|added/.test(e.type)).length;
+  const pauses = (s.captureEvents || []).filter((e) => e.type === 'paused').length;
+  if (pauses) t.push(`<span class="tag" title="녹화 중 일시정지한 횟수(멈춘 동안은 녹화되지 않음)">일시정지 ${pauses}</span>`);
   if (moves) t.push(`<span class="tag" title="녹화 중 모니터 연결이 바뀌었습니다">화면 변화 ${moves}</span>`);
   if (s.hasTranscript) t.push('<span class="tag ok">전사</span>');
   if (s.hasSummary) t.push('<span class="tag ok">요약</span>');
@@ -175,10 +186,14 @@ const EV = {
   'display-lost': (n) => `${n} 분리 — 이 화면만 일시정지, 녹화는 계속`,
   'display-resumed': (n) => `${n} 다시 연결 — 이어서 녹화`,
   'display-added': (n) => `${n} 새로 연결 — 녹화에 추가`,
+  paused: () => '일시정지',
+  resumed: (n, e) => `다시 녹화${e?.detail ? ` (${e.detail.replace('초 멈춤', '')}초 동안 멈춤)` : ''}`,
 };
 function evText(e, startIso) {
   const t = startIso ? hms((new Date(e.at) - new Date(startIso)) / 1000) : new Date(e.at).toLocaleTimeString('ko-KR');
-  return `${t} · ${(EV[e.type] || ((n) => `${e.type} ${n}`))(e.name || '화면')}`;
+  // 일시정지 기록은 «파일 안의 시각»(t)으로 보여 준다(멈춘 시간은 파일에 없으므로)
+  const tt = typeof e.t === 'number' ? hms(e.t) : t;
+  return `${/paused|resumed/.test(e.type) ? tt : t} · ${(EV[e.type] || ((n) => `${e.type} ${n}`))(e.name || '화면', e)}`;
 }
 function icon(s) { return s.sources?.video ? '🖥' : '🎙'; }
 function srcText(s) {
@@ -301,7 +316,7 @@ function renderJob() {
   } else if (j?.status === 'error') h = `<div class="job" style="color:var(--accent)">처리 오류: ${esc(j.error)}</div>`;
   else if (s.status === 'failed') h = `<div class="job" style="color:var(--accent)">녹화 실패: ${esc(s.error || '')}</div>`;
   const ev = s.captureEvents || [];
-  if (ev.length) h += `<details class="job"><summary>녹화 중 화면 변화 ${ev.length}건 (녹화는 끊기지 않았습니다)</summary>${ev.map((e) => `<div class="muted">${esc(evText(e, s.createdAt))}</div>`).join('')}</details>`;
+  if (ev.length) h += `<details class="job"><summary>녹화 중 기록 ${ev.length}건 (화면 변화·일시정지)</summary>${ev.map((e) => `<div class="muted">${esc(evText(e, s.createdAt))}</div>`).join('')}</details>`;
   $('#dJob').innerHTML = h;
 }
 function renderTranscript() {

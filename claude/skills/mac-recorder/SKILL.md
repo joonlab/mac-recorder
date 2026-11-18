@@ -58,6 +58,8 @@ macrec show 20261112   # ID 앞부분으로 찾기
 macrec start                 # 설정된 기본 소스(화면·마이크 등)로 시작
 macrec start --audio-only    # 소리만(m4a)
 macrec start --system        # 시스템 소리(화상회의 상대 목소리) 포함
+macrec pause                 # 일시정지(멈춘 동안은 화면·소리 모두 녹화 안 됨)
+macrec resume                # 같은 파일에 이어서 녹화(멈춘 시간은 파일에서 빠짐)
 macrec stop
 macrec status
 ```

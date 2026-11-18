@@ -242,7 +242,9 @@ let iso: ISO8601DateFormatter = { let f = ISO8601DateFormatter(); f.formatOption
 /// 지금 시각을 녹화 시간축(파일의 0초 = 주 녹화 시작)의 초로. 합본에서 화면이 빠진 구간을 정확히 자르는 데 쓴다.
 func nowOnTimeline() -> Double? {
   guard let st = timeline.start else { return nil }
-  return CMTimeGetSeconds(CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), st))
+  // 일시정지 중이면 멈춘 시점, 아니면 지금. 둘 다 멈춰 있던 시간을 뺀 «파일 안의 시각»
+  let raw = timeline.pausedAt ?? CMClockGetTime(CMClockGetHostTimeClock())
+  return CMTimeGetSeconds(CMTimeSubtract(CMTimeSubtract(raw, timeline.offset), st))
 }
 let eventsLock = NSLock()
 var events: [[String: Any]] = []
@@ -265,10 +267,43 @@ final class Timeline {
   private let lock = NSLock()
   private var _start: CMTime? = nil
   private var _latest = CMTime.invalid
+  // 일시정지: 멈춘 시간을 누적해 두고, 다시 시작한 뒤의 모든 샘플 시각에서 뺀다 → 파일에는 멈춘 구간이 없다
+  private var _offset = CMTime.zero
+  private var _pausedAt: CMTime? = nil
   var start: CMTime? { lock.lock(); defer { lock.unlock() }; return _start }
   func startIfNil(_ t: CMTime) -> CMTime { lock.lock(); defer { lock.unlock() }; if _start == nil { _start = t }; return _start! }
   func bump(_ t: CMTime) { lock.lock(); if !_latest.isValid || t > _latest { _latest = t }; lock.unlock() }
   var latest: CMTime? { lock.lock(); defer { lock.unlock() }; return _latest.isValid ? _latest : nil }
+  var offset: CMTime { lock.lock(); defer { lock.unlock() }; return _offset }
+  var isPaused: Bool { lock.lock(); defer { lock.unlock() }; return _pausedAt != nil }
+  var pausedAt: CMTime? { lock.lock(); defer { lock.unlock() }; return _pausedAt }
+  func pause(_ now: CMTime) { lock.lock(); if _pausedAt == nil { _pausedAt = now }; lock.unlock() }
+  /// 다시 시작. 이번에 멈춰 있던 시간(초)을 돌려준다
+  func resume(_ now: CMTime) -> Double {
+    lock.lock(); defer { lock.unlock() }
+    guard let p = _pausedAt else { return 0 }
+    let d = CMTimeSubtract(now, p)
+    _offset = CMTimeAdd(_offset, d); _pausedAt = nil
+    return CMTimeGetSeconds(d)
+  }
+  var pausedTotal: Double { lock.lock(); defer { lock.unlock() }; return CMTimeGetSeconds(_offset) }
+}
+let hostNow = { CMClockGetTime(CMClockGetHostTimeClock()) }
+
+/// 샘플 시각을 일시정지로 멈췄던 시간만큼 앞으로 당긴 복사본
+func retimed(_ sb: CMSampleBuffer, by off: CMTime) -> CMSampleBuffer? {
+  var n: CMItemCount = 0
+  CMSampleBufferGetSampleTimingInfoArray(sb, entryCount: 0, arrayToFill: nil, entriesNeededOut: &n)
+  guard n > 0 else { return sb }
+  var infos = [CMSampleTimingInfo](repeating: CMSampleTimingInfo(), count: n)
+  CMSampleBufferGetSampleTimingInfoArray(sb, entryCount: n, arrayToFill: &infos, entriesNeededOut: &n)
+  for i in 0..<infos.count {
+    if infos[i].presentationTimeStamp.isValid { infos[i].presentationTimeStamp = CMTimeSubtract(infos[i].presentationTimeStamp, off) }
+    if infos[i].decodeTimeStamp.isValid { infos[i].decodeTimeStamp = CMTimeSubtract(infos[i].decodeTimeStamp, off) }
+  }
+  var out: CMSampleBuffer?
+  guard CMSampleBufferCreateCopyWithNewTiming(allocator: nil, sampleBuffer: sb, sampleTimingEntryCount: n, sampleTimingArray: &infos, sampleBufferOut: &out) == noErr else { return nil }
+  return out
 }
 let timeline = Timeline()
 
@@ -296,6 +331,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
   private var _stream: SCStream?
   private var _currentID: UInt32?
   var lastError = ""
+  var quietReconnect = false   // 일시정지에서 다시 시작할 때 다시 연결하는 건 «화면 변화»로 기록하지 않는다
   let q: DispatchQueue
 
   var stream: SCStream? { lock.lock(); defer { lock.unlock() }; return _stream }
@@ -398,7 +434,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
   func appendBlank() {
     q.async { [self] in
       guard role == .extra, writing, let w = writer, w.status == .writing, let v = vInput, v.isReadyForMoreMediaData, outW > 0 else { return }
-      var now = CMClockGetTime(CMClockGetHostTimeClock())
+      var now = CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), timeline.offset)
       if lastVideoPTS.isValid && now <= lastVideoPTS { now = CMTimeAdd(lastVideoPTS, CMTime(value: 1, timescale: 1000)) }
       var pb: CVPixelBuffer?
       let attrs: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
@@ -421,6 +457,10 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
       if let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
          let raw = arr.first?[.status] as? Int, let st = SCFrameStatus(rawValue: raw), st != .complete { return }
     }
+    if timeline.isPaused { return }   // 일시정지 중에는 아무것도 쓰지 않는다
+    var sb = sb
+    let off = timeline.offset
+    if off > .zero { guard let r = retimed(sb, by: off) else { return }; sb = r }
     let pts = CMSampleBufferGetPresentationTimeStamp(sb)
     if !writing {
       if role == .primary {
@@ -480,8 +520,31 @@ final class Supervisor {
   private var busy = false
   private var again = false
 
+  var paused = false
+  var pausedSince: Date? = nil
+
+  /// 일시정지: 모든 화면·소리 수집을 끊는다(macOS 화면 녹화 표시도 꺼진다). 파일은 열어 둔다.
+  func pause() {
+    guard !finishing, !paused else { return }
+    paused = true; pausedSince = Date()
+    timeline.pause(hostNow())
+    event("paused", nil)
+    Task { @MainActor in
+      for c in self.captures { if c.stream != nil { c.quietReconnect = true }; await c.disconnect() }
+      self.writeLive()
+    }
+  }
+  /// 다시 시작: 같은 파일에 이어 쓴다. 멈춰 있던 시간은 파일에서 빠진다.
+  func resume() {
+    guard !finishing, paused else { return }
+    let d = timeline.resume(hostNow())
+    paused = false; pausedSince = nil
+    event("resumed", nil, String(format: "%.1f초 멈춤", d))
+    kick()
+  }
+
   func kick() {
-    guard !finishing else { return }
+    guard !finishing, !paused else { return }
     if busy { again = true; return }
     busy = true
     Task { @MainActor in
@@ -516,6 +579,7 @@ final class Supervisor {
         // 2) 끊겨 있으면 다시 연결. 추가 화면은 자기 화면이 돌아왔을 때만
         if c.role == .extra, let t = c.targetID, !online.contains(t) { continue }
         if await c.connect(), let now = c.currentID {
+          if c.quietReconnect { c.quietReconnect = false; continue }
           if c.role == .primary {
             event(c.targetID == nil || now == c.targetID ? "primary-resumed" : "primary-moved", now, file: c.file)
           } else { event("display-resumed", now, file: c.file) }
@@ -547,7 +611,9 @@ final class Supervisor {
       if let cur = c.currentID { o["current"] = Int(cur) }
       return o
     }
-    writeStatus(finishing ? "finishing" : "recording", ["events": ev, "files": files])
+    var extra: [String: Any] = ["events": ev, "files": files, "paused": paused, "pausedTotalSec": timeline.pausedTotal]
+    if let p = pausedSince { extra["pausedSince"] = iso.string(from: p) }
+    writeStatus(finishing ? "finishing" : (paused ? "paused" : "recording"), extra)
   }
 
   func finish(reason: String) {
@@ -599,6 +665,14 @@ if allDisplays && wantVideo {
 }
 
 var signalSources: [DispatchSourceSignal] = []
+// 일시정지·다시 시작은 서버가 신호로 보낸다: SIGUSR1 = 일시정지, SIGUSR2 = 다시 시작
+for (sig, f) in [(SIGUSR1, { supervisor.pause() }), (SIGUSR2, { supervisor.resume() })] {
+  signal(sig, SIG_IGN)
+  let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+  src.setEventHandler(handler: f)
+  src.resume()
+  signalSources.append(src)
+}
 for sig in [SIGINT, SIGTERM, SIGHUP] {
   signal(sig, SIG_IGN)
   let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)

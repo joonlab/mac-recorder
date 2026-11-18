@@ -59,7 +59,11 @@ macrec doctor                                  # 전부 ✅ 인지 확인
 
 화면 오른쪽 위 조리개 아이콘을 누르면 녹화 시작·정지, 녹화할 소스(화면·마이크·시스템 소리), 화면·마이크 선택, 최근 녹화, 대시보드 열기가 있습니다. 녹화 중에는 아이콘 가운데가 빨갛게 바뀌고 경과 시간이 표시됩니다.
 
-**단축키 ⌃⌥⌘R**(Control+Option+Command+R) — 어느 앱에서든 녹화를 시작하고 멈춥니다.
+**단축키** — 어느 앱에서든 쓸 수 있습니다.
+- **⌃⌥⌘R**(Control+Option+Command+R): 녹화 시작·정지
+- **⌃⌥⌘P**: 일시정지·다시 녹화
+
+**일시정지**: 쉬는 시간이나 개인 메시지를 볼 때 누르면, 다시 녹화할 때까지 화면·소리를 전혀 수집하지 않습니다(macOS 화면 녹화 표시도 꺼집니다). 다시 녹화하면 같은 파일에 이어 쓰고, 멈춘 시간은 파일에서 빠집니다. 녹화를 여러 개로 나눴다가 합칠 필요가 없습니다. 녹화 상세의 «녹화 중 기록»에서 어디서 멈췄는지 볼 수 있습니다.
 
 ### 대시보드 (http://127.0.0.1:7931)
 
@@ -79,6 +83,7 @@ macrec doctor                                  # 전부 ✅ 인지 확인
 macrec start                  # 기본 소스로 녹화 시작
 macrec start --audio-only     # 소리만
 macrec start --system         # 시스템 소리(화상회의 상대 목소리) 포함
+macrec pause                  # 일시정지 (macrec resume 으로 이어서 녹화)
 macrec stop
 macrec list                   # 최근 녹화
 macrec show latest            # 가장 최근 녹화의 파일 경로
@@ -100,7 +105,7 @@ macrec doctor                 # 설치·권한·서버 점검
 
 ### Raycast (선택)
 
-Raycast 를 쓰고 있다면 Raycast 설정 → Extensions → Script Commands → **Add Directories** 에서 설치 위치(`macrec version` 으로 확인)의 `raycast/` 폴더를 추가하세요. «녹화 시작/정지», «녹음 시작 (소리만)», «녹화 상태», «녹화 대시보드 열기», «녹화 폴더 열기» 명령이 생깁니다.
+Raycast 를 쓰고 있다면 Raycast 설정 → Extensions → Script Commands → **Add Directories** 에서 설치 위치(`macrec version` 으로 확인)의 `raycast/` 폴더를 추가하세요. «녹화 시작/정지», «녹화 일시정지/다시 녹화», «녹음 시작 (소리만)», «녹화 상태», «녹화 대시보드 열기», «녹화 폴더 열기» 명령이 생깁니다.
 
 ## 전사·교정·요약
 

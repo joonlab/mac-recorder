@@ -6,7 +6,9 @@ import AppKit
 enum IconArt {
   static let red = NSColor(srgbRed: 0.898, green: 0.282, blue: 0.302, alpha: 1)
 
-  static func menuBar(recording: Bool, pulse: Bool = false) -> NSImage {
+  static let amber = NSColor(srgbRed: 0.93, green: 0.58, blue: 0.13, alpha: 1)
+
+  static func menuBar(recording: Bool, paused: Bool = false, pulse: Bool = false) -> NSImage {
     let size = NSSize(width: 18, height: 18)
     let img = NSImage(size: size, flipped: false) { _ in
       let c = NSPoint(x: 9, y: 9)
@@ -40,7 +42,12 @@ enum IconArt {
       }
       blades.stroke()
 
-      if recording {
+      if recording && paused {
+        // 일시정지: 가운데에 주황색 막대 두 개
+        amber.setFill()
+        NSBezierPath(roundedRect: NSRect(x: c.x - 2.6, y: c.y - 2.8, width: 1.9, height: 5.6), xRadius: 0.6, yRadius: 0.6).fill()
+        NSBezierPath(roundedRect: NSRect(x: c.x + 0.7, y: c.y - 2.8, width: 1.9, height: 5.6), xRadius: 0.6, yRadius: 0.6).fill()
+      } else if recording {
         let hole = NSBezierPath()
         for k in 0..<6 {
           let a = CGFloat(k) * .pi / 3 + .pi / 6
@@ -54,7 +61,7 @@ enum IconArt {
       return true
     }
     img.isTemplate = !recording
-    img.accessibilityDescription = recording ? "MacRecorder 녹화 중" : "MacRecorder"
+    img.accessibilityDescription = recording ? (paused ? "MacRecorder 일시정지" : "MacRecorder 녹화 중") : "MacRecorder"
     return img
   }
 }

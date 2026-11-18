@@ -53,6 +53,7 @@ const HELP = `macrec — MacRecorder
 녹화
   macrec start [--no-video] [--audio-only] [--no-mic] [--system] [--title "제목"]
   macrec stop
+  macrec pause | resume                 일시정지·다시 녹화(같은 파일에 이어 쓰고, 멈춘 시간은 빠짐)
   macrec toggle
   macrec status [--json]
 
@@ -99,11 +100,15 @@ async function main() {
       return out(r, `● 녹화 시작 ${r.id} (${[r.sources.video && '화면', r.sources.mic && '마이크', r.sources.system && '시스템 소리'].filter(Boolean).join('·')})`);
     }
     case 'stop': { const r = await api('stop', { body: {} }); return out(r, `■ 녹화 정지 ${r.id} — 파일 정리 후 목록에 나타납니다.`); }
+    case 'pause': case 'resume': case 'pause-toggle': {
+      const r = await api('pause', { body: cmd === 'pause-toggle' ? {} : { paused: cmd === 'pause' } });
+      return out(r, r.paused ? `⏸ 일시정지 ${r.id} — 이 동안은 아무것도 녹화되지 않습니다. 'macrec resume' 으로 이어서 녹화` : `● 다시 녹화 ${r.id}`);
+    }
     case 'toggle': { const r = await api('toggle', { body: {} }); return out(r, r.action === 'started' ? `● 녹화 시작 ${r.id}` : `■ 녹화 정지 ${r.id}`); }
     case 'status': {
       const s = await api('status');
       const a = s.active;
-      return out(s, a ? `● 녹화 중 ${hms(a.elapsedSec)} (${a.id})` : `대기 중 · 대시보드 ${BASE} · 전사 ${s.whisper.ready ? '가능' : '미설치'} · AI ${s.ai.provider}${s.proposals ? ` · 교정 제안 ${s.proposals}개` : ''}`);
+      return out(s, a ? `${a.paused ? '⏸ 일시정지' : '● 녹화 중'} ${hms(a.elapsedSec)} (${a.id})` : `대기 중 · 대시보드 ${BASE} · 전사 ${s.whisper.ready ? '가능' : '미설치'} · AI ${s.ai.provider}${s.proposals ? ` · 교정 제안 ${s.proposals}개` : ''}`);
     }
     case 'list': case 'ls': {
       const n = Number(flagVal('-n') || 10);

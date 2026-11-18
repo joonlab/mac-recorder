@@ -64,7 +64,7 @@ function status() {
   if (active) elapsed = (Date.now() - new Date(active.startedAt).getTime()) / 1000;
   return {
     ok: true, version: VERSION, now: new Date().toISOString(),
-    active: active ? { ...active, elapsedSec: Math.round(elapsed) } : null,
+    active: active ? { ...active, elapsedSec: active.recordedSec ?? Math.round(elapsed) } : null,
     record: cfg.record,
     whisper: whisperStatus(),
     ai: providerStatus(cfg),
@@ -94,6 +94,11 @@ async function api(req, res, url) {
 
   if (a === 'start' && m === 'POST') return json(res, 200, { ok: true, ...(await S.startRecording(await body(req))) });
   if (a === 'stop' && m === 'POST') return json(res, 200, { ok: true, ...S.stopRecording() });
+  if (a === 'pause' && m === 'POST') {
+    // body.paused: true=일시정지, false=다시 시작, 없으면 전환
+    const p = await body(req);
+    return json(res, 200, { ok: true, ...S.pauseRecording(p.paused) });
+  }
   if (a === 'toggle' && m === 'POST') {
     if (S.getActive()) return json(res, 200, { ok: true, action: 'stopped', ...S.stopRecording() });
     return json(res, 200, { ok: true, action: 'started', ...(await S.startRecording(await body(req))) });
