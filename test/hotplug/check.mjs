@@ -14,4 +14,5 @@ console.log(`\n${id}  상태=${s.status}  길이=${s.durationSec}s`);
 for (const f of [s.media, ...(s.extras || []), 'recording_all.mp4']) {
   if (fs.existsSync(path.join(dir, f))) console.log(`  ${f.padEnd(22)} 전체 ${dur(f)}s · 영상 ${dur(f, 'v:0')}s${f === s.media ? ` · 마이크 ${dur(f, 'a:0')}s` : ''}`);
 }
-for (const e of s.captureEvents || []) console.log(`  · ${e.at.slice(11, 19)} ${e.type} ${e.name || ''}`);
+for (const g of s.layout || []) console.log(`  ▣ ${g.from.toFixed(1)}~${g.to.toFixed(1)}s 합본: ${g.files.join(' + ')}`);
+for (const e of s.captureEvents || []) console.log(`  · ${typeof e.t === 'number' ? `${e.t.toFixed(1)}s` : e.at.slice(11, 19)} ${e.type} ${e.name || ''} ${e.file || ''}`);

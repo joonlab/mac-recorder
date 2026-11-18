@@ -238,12 +238,19 @@ func scaledSize(_ w: Int, _ h: Int, _ targetW: Int) -> (Int, Int) {
 
 // MARK: - 기록(상태 파일의 events)
 
-let iso = ISO8601DateFormatter()
+let iso: ISO8601DateFormatter = { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f }()
+/// 지금 시각을 녹화 시간축(파일의 0초 = 주 녹화 시작)의 초로. 합본에서 화면이 빠진 구간을 정확히 자르는 데 쓴다.
+func nowOnTimeline() -> Double? {
+  guard let st = timeline.start else { return nil }
+  return CMTimeGetSeconds(CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), st))
+}
 let eventsLock = NSLock()
 var events: [[String: Any]] = []
 func eventSnapshot() -> [[String: Any]] { eventsLock.lock(); defer { eventsLock.unlock() }; return events }
-func event(_ type: String, _ display: UInt32?, _ detail: String = "") {
+func event(_ type: String, _ display: UInt32?, _ detail: String = "", file: String? = nil) {
   var e: [String: Any] = ["at": iso.string(from: Date()), "type": type]
+  if let t = nowOnTimeline() { e["t"] = (max(0, t) * 1000).rounded() / 1000 }
+  if let f = file { e["file"] = f }
   if let d = display { e["display"] = Int(d); e["name"] = displayName(d) }
   if !detail.isEmpty { e["detail"] = detail }
   eventsLock.lock(); events.append(e); eventsLock.unlock()
@@ -386,6 +393,28 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
     try? await s.stopCapture()
   }
 
+  private var lastVideoPTS = CMTime.invalid
+  /// 추가 화면이 빠진 순간 검정 화면을 한 장 넣는다. 안 넣으면 플레이어가 빠진 동안 마지막 장면을 계속 보여 준다.
+  func appendBlank() {
+    q.async { [self] in
+      guard role == .extra, writing, let w = writer, w.status == .writing, let v = vInput, v.isReadyForMoreMediaData, outW > 0 else { return }
+      var now = CMClockGetTime(CMClockGetHostTimeClock())
+      if lastVideoPTS.isValid && now <= lastVideoPTS { now = CMTimeAdd(lastVideoPTS, CMTime(value: 1, timescale: 1000)) }
+      var pb: CVPixelBuffer?
+      let attrs: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
+      guard CVPixelBufferCreate(nil, outW, outH, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb) == kCVReturnSuccess, let buf = pb else { return }
+      CVPixelBufferLockBaseAddress(buf, [])
+      if let base = CVPixelBufferGetBaseAddress(buf) { memset(base, 0, CVPixelBufferGetDataSize(buf)) }
+      CVPixelBufferUnlockBaseAddress(buf, [])
+      var fmt: CMVideoFormatDescription?
+      guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: buf, formatDescriptionOut: &fmt) == noErr, let f = fmt else { return }
+      var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: now, decodeTimeStamp: .invalid)
+      var sb: CMSampleBuffer?
+      guard CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: buf, formatDescription: f, sampleTiming: &timing, sampleBufferOut: &sb) == noErr, let sample = sb else { return }
+      if v.append(sample) { lastVideoPTS = now; timeline.bump(now); log("blank frame → \(file)") }
+    }
+  }
+
   func stream(_ s: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
     guard !finishing, isActive(s), CMSampleBufferDataIsReady(sb), let w = writer else { return }
     if type == .screen {
@@ -410,7 +439,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
     guard w.status == .writing else { return }
     var ok = false
     switch type {
-    case .screen: if let v = vInput, v.isReadyForMoreMediaData { ok = v.append(sb) }
+    case .screen: if let v = vInput, v.isReadyForMoreMediaData { ok = v.append(sb); if ok { lastVideoPTS = pts } }
     case .audio: if let a = sysInput, a.isReadyForMoreMediaData { ok = a.append(sb) }
     case .microphone: if let a = micInput, a.isReadyForMoreMediaData { ok = a.append(sb) }
     @unknown default: break
@@ -423,7 +452,8 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
     guard isActive(s) else { return }
     let was = currentID
     setActive(nil, nil)
-    event(role == .primary ? "primary-lost" : "display-lost", was, error.localizedDescription)
+    event(role == .primary ? "primary-lost" : "display-lost", was, error.localizedDescription, file: file)
+    appendBlank()
     DispatchQueue.main.async { supervisor.kick() }
   }
 
@@ -479,20 +509,21 @@ final class Supervisor {
       // 1) 연결된 화면이 목록에서 빠졌으면 먼저 끊는다(스트림 오류보다 화면 변경 알림이 빨리 올 때가 있다)
       if let cur = c.currentID, !online.contains(cur) {
         await c.disconnect()
-        event(c.role == .primary ? "primary-lost" : "display-lost", cur, "화면 연결 해제")
+        event(c.role == .primary ? "primary-lost" : "display-lost", cur, "화면 연결 해제", file: c.file)
+        c.appendBlank()
       }
       if c.stream == nil {
         // 2) 끊겨 있으면 다시 연결. 추가 화면은 자기 화면이 돌아왔을 때만
         if c.role == .extra, let t = c.targetID, !online.contains(t) { continue }
         if await c.connect(), let now = c.currentID {
           if c.role == .primary {
-            event(c.targetID == nil || now == c.targetID ? "primary-resumed" : "primary-moved", now)
-          } else { event("display-resumed", now) }
+            event(c.targetID == nil || now == c.targetID ? "primary-resumed" : "primary-moved", now, file: c.file)
+          } else { event("display-resumed", now, file: c.file) }
         }
       } else if c.role == .primary, let t = c.targetID, let cur = c.currentID, cur != t, online.contains(t) {
         // 3) 주 녹화가 다른 화면으로 옮겨 가 있는데 원래 화면이 돌아왔으면 되돌린다
         await c.disconnect()
-        if await c.connect(), let now = c.currentID { event("primary-returned", now) }
+        if await c.connect(), let now = c.currentID { event("primary-returned", now, file: c.file) }
       }
     }
     // 4) «전체 화면» 녹화 중 새로 꽂은 화면은 녹화에 더한다
@@ -503,7 +534,7 @@ final class Supervisor {
         while FileManager.default.fileExists(atPath: (outDir as NSString).appendingPathComponent(name)) { name = "display-\(id)-\(k).mp4"; k += 1 }
         let c = Capture(.extra, target: id, path: (outDir as NSString).appendingPathComponent(name), fallback: false)
         captures.append(c)
-        if await c.connect() { event("display-added", id) }
+        if await c.connect() { event("display-added", id, file: c.file) }
       }
     }
   }
@@ -588,8 +619,8 @@ Task { @MainActor in
     writeStatus("failed", ["error": p.lastError])
     exit(2)
   }
-  event("start", p.currentID)
-  for c in supervisor.captures.dropFirst() { if await c.connect() { event("start", c.currentID) } }
+  event("start", p.currentID, file: p.file)
+  for c in supervisor.captures.dropFirst() { if await c.connect() { event("start", c.currentID, file: c.file) } }
   supervisor.writeLive()
 }
 RunLoop.main.run()

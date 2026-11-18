@@ -1,6 +1,6 @@
 {
   "name": "mac-recorder",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "맥 화면·마이크·시스템 소리 녹화 + 로컬 전사 + 요약. 메뉴바·대시보드·CLI.",
   "type": "module",

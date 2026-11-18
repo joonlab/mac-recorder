@@ -75,7 +75,7 @@ async function finalize() {
   // 4) 여러 화면 → 실제 모니터 배치(왼쪽→오른쪽) 순서로 나란히 합본
   if (extras.length) {
     setJob({ step: '여러 화면 합치는 중' });
-    try { await stackDisplays(dir, files, s); } catch (e) { log('합본 실패', e.message); }
+    try { updateSession(id, { layout: await stackDisplays(dir, files, s, cap.events || []) }); } catch (e) { log('합본 실패', e.message); }
   }
   const info = await probe(media);
   updateSession(id, { status: 'ready', durationSec: Math.round(info.durationSec), audioTracks: info.audioTracks.length });
@@ -84,33 +84,81 @@ async function finalize() {
 }
 
 let current = null; // 실패 시 어느 항목에 오류를 적을지
-/** 화면별 파일을 가로로 이어 붙인다. 모든 파일은 같은 시간축이라(엔진이 시작 시각을 맞춤),
- *  나중에 연결된 화면은 앞부분이 비어 있다 → 그만큼 검정 화면으로 채운다. */
-async function stackDisplays(dir, files, s) {
+/** 화면별 파일 → 합본(recording_all.mp4).
+ *  모니터가 연결돼 있던 구간에만 그 화면을 넣는다. 빠진 구간은 남은 화면만으로 다시 배치해 같은 크기에 맞춘다
+ *  (빠진 화면이 마지막 장면으로 멈춰 남지 않게). 구간은 녹화 엔진이 남긴 화면 변화 시각(t, 초)으로 자른다.
+ *  모든 파일은 같은 시간축이라(엔진이 시작 시각을 맞춤) 나중에 연결된 화면은 앞부분이 비어 있다. */
+async function stackDisplays(dir, files, s, events) {
+  const FPS = 30;
   const order = [...files].sort((a, b) => (a.x ?? 0) - (b.x ?? 0));
   const meta = [];
   for (const f of order) {
-    const { stdout } = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=height,start_time',
+    const { stdout } = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,start_time',
       '-of', 'json', path.join(dir, f.file)], { timeout: 30000 });
     const st = JSON.parse(stdout).streams?.[0] || {};
-    meta.push({ file: f.file, h: Number(st.height) || 0, start: Math.max(0, Number(st.start_time) || 0) });
+    meta.push({ ...f, w: Number(st.width) || 0, h: Number(st.height) || 0, start: Math.max(0, Number(st.start_time) || 0) });
   }
+  const D = (await probe(path.join(dir, s.media))).durationSec;
   const H = Math.max(...meta.map((m) => m.h)) & ~1;
-  if (!H) throw new Error('영상 높이를 읽지 못함');
-  const mixed = s.media.replace(/(\.[^.]+)$/, '_mixed$1');
-  const audioSrc = fs.existsSync(path.join(dir, mixed)) ? mixed : s.media;
+  if (!H || !D) throw new Error('영상 크기·길이를 읽지 못함');
+  for (const m of meta) m.pw = Math.round((m.w * H) / m.h / 2) * 2; // 높이 H 로 맞췄을 때 폭
+
+  // 화면별 연결 구간. 시각(t)이 없는 옛 엔진 기록이면 처음부터 끝까지 연결된 것으로 본다(예전 방식).
+  const timed = events.some((e) => typeof e.t === 'number' && e.file);
+  const online = (m, t) => {
+    if (m.role === 'primary' || !timed) return true;
+    const mine = events.filter((x) => x.file === m.file);
+    // 처음부터 녹화한 화면(«start» 기록)은 0초부터 연결된 것으로 본다(연결 기록이 시작보다 조금 늦게 남는다)
+    let on = mine.some((x) => x.type === 'start');
+    for (const e of mine.filter((x) => typeof x.t === 'number' && x.type !== 'start').sort((x, y) => x.t - y.t)) {
+      if (e.t > t) break;
+      if (/start|added|resumed/.test(e.type)) on = true;
+      if (/lost/.test(e.type)) on = false;
+    }
+    return on;
+  };
+  const cuts = [...new Set([0, D, ...(timed ? events.filter((e) => e.file && e.file !== s.media && e.type !== 'start' && typeof e.t === 'number' && e.t > 0 && e.t < D).map((e) => e.t) : [])])].sort((a, b) => a - b);
+  const segs = [];
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const [a, b] = [cuts[i], cuts[i + 1]];
+    if (b - a < 0.2 && segs.length) { segs[segs.length - 1].b = b; continue; }
+    segs.push({ a, b, active: meta.filter((m) => online(m, (a + b) / 2)) });
+  }
+  // 이어진 같은 배치는 합친다
+  const merged = [];
+  for (const g of segs) {
+    const last = merged[merged.length - 1];
+    if (last && last.active.map((m) => m.file).join() === g.active.map((m) => m.file).join()) last.b = g.b; else merged.push({ ...g });
+  }
+  const W = Math.max(...merged.map((g) => g.active.reduce((n, m) => n + m.pw, 0))) & ~1;
+
+  // 각 파일을 [0, D] 전체를 덮는 고정 프레임 영상으로 만든 뒤(앞의 빈 곳은 검정, 화면이 그대로인 동안은 직전 장면) 구간마다 잘라 쓴다
   const args = ['-hide_banner', '-loglevel', 'error', '-y'];
   meta.forEach((m) => args.push('-i', path.join(dir, m.file)));
-  args.push('-i', path.join(dir, audioSrc));
-  const fc = meta.map((m, i) => `[${i}:v]setpts=PTS-STARTPTS,scale=-2:${H},setsar=1${m.start > 0.05 ? `,tpad=start_duration=${m.start.toFixed(3)}:start_mode=add:color=black` : ''}[v${i}]`).join(';')
-    + `;${meta.map((_, i) => `[v${i}]`).join('')}hstack=inputs=${meta.length}[v]`;
+  const mixed = s.media.replace(/(\.[^.]+)$/, '_mixed$1');
+  args.push('-i', path.join(dir, fs.existsSync(path.join(dir, mixed)) ? mixed : s.media));
+  const parts = [];
+  meta.forEach((m, i) => {
+    const uses = merged.filter((g) => g.active.includes(m)).length;
+    if (!uses) return;
+    const pad = m.start > 0.05 ? `,tpad=start_duration=${m.start.toFixed(3)}:start_mode=add:color=black` : '';
+    parts.push(`[${i}:v]setpts=PTS-STARTPTS${pad},fps=${FPS},tpad=stop_mode=clone:stop_duration=${Math.ceil(D) + 1},scale=${m.pw}:${H},setsar=1${uses > 1 ? `,split=${uses}` : ''}${Array.from({ length: uses }, (_, k) => `[c${i}_${k}]`).join('')}`);
+  });
+  const used = meta.map(() => 0);
+  merged.forEach((g, j) => {
+    const ins = g.active.map((m) => { const i = meta.indexOf(m); const lab = `c${i}_${used[i]++}`; parts.push(`[${lab}]trim=start=${g.a.toFixed(3)}:end=${g.b.toFixed(3)},setpts=PTS-STARTPTS[t${j}_${i}]`); return `[t${j}_${i}]`; });
+    const lay = ins.length > 1 ? `${ins.join('')}hstack=inputs=${ins.length}` : `${ins[0]}null`;
+    parts.push(`${lay},scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1[g${j}]`);
+  });
+  parts.push(`${merged.map((_, j) => `[g${j}]`).join('')}concat=n=${merged.length}:v=1:a=0[v]`);
   const out = path.join(dir, 'recording_all.mp4');
-  const base = [...args, '-filter_complex', fc, '-map', '[v]', '-map', `${meta.length}:a:0?`];
-  const tail = ['-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-f', 'mp4', `${out}.part`];
+  const base = [...args, '-filter_complex', parts.join(';'), '-map', '[v]', '-map', `${meta.length}:a:0?`];
+  const tail = ['-c:a', 'aac', '-b:a', '192k', '-t', D.toFixed(3), '-movflags', '+faststart', '-f', 'mp4', `${out}.part`];
   try { await run('ffmpeg', [...base, '-c:v', 'h264_videotoolbox', '-b:v', '8M', ...tail], { timeout: 6 * 3600_000 }); }
   catch { await run('ffmpeg', [...base, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', ...tail], { timeout: 6 * 3600_000 }); }
   fs.renameSync(`${out}.part`, out);
-  log(`stacked ${meta.map((m) => `${m.file}@${m.start.toFixed(1)}s`).join(' + ')} → recording_all.mp4`);
+  log(`stacked ${merged.map((g) => `${g.a.toFixed(1)}-${g.b.toFixed(1)}s[${g.active.map((m) => m.file).join('+')}]`).join(' ')} → recording_all.mp4`);
+  return merged.map((g) => ({ from: g.a, to: g.b, files: g.active.map((m) => m.file) }));
 }
 
 async function stepTranscribe() {
