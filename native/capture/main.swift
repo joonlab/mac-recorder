@@ -21,6 +21,7 @@ import AppKit
 import AVFoundation
 import CoreMedia
 import Foundation
+import IOKit.pwr_mgt
 import ScreenCaptureKit
 
 // MARK: - 인자
@@ -524,11 +525,14 @@ final class Supervisor {
   var pausedSince: Date? = nil
 
   /// 일시정지: 모든 화면·소리 수집을 끊는다(macOS 화면 녹화 표시도 꺼진다). 파일은 열어 둔다.
-  func pause() {
+  var pauseReason = ""   // manual | sleep | lock
+
+  /// reason: manual(사용자) · sleep(잠자기) · lock(화면 잠금). 어느 경우든 다시 녹화는 사용자가 직접 누른다.
+  func pause(reason: String = "manual") {
     guard !finishing, !paused else { return }
-    paused = true; pausedSince = Date()
+    paused = true; pausedSince = Date(); pauseReason = reason
     timeline.pause(hostNow())
-    event("paused", nil)
+    event("paused", nil, reason)
     Task { @MainActor in
       for c in self.captures { if c.stream != nil { c.quietReconnect = true }; await c.disconnect() }
       self.writeLive()
@@ -612,7 +616,7 @@ final class Supervisor {
       return o
     }
     var extra: [String: Any] = ["events": ev, "files": files, "paused": paused, "pausedTotalSec": timeline.pausedTotal]
-    if let p = pausedSince { extra["pausedSince"] = iso.string(from: p) }
+    if let p = pausedSince { extra["pausedSince"] = iso.string(from: p); extra["pauseReason"] = pauseReason }
     writeStatus(finishing ? "finishing" : (paused ? "paused" : "recording"), extra)
   }
 
@@ -679,6 +683,28 @@ for sig in [SIGINT, SIGTERM, SIGHUP] {
   src.setEventHandler { supervisor.finish(reason: "signal \(sig)") }
   src.resume()
   signalSources.append(src)
+}
+
+// 잠자기·화면 잠금 → 자동 일시정지. 깨어나도 자동으로 다시 녹화하지 않는다(사용자가 메뉴바·대시보드에서 «다시 녹화»).
+// 덮개를 닫아 잠들면 잠금 화면이 녹화되던 문제(2026-11-18 피드백) 대응.
+// IOKit 전원 알림은 이 백그라운드 프로세스에도 온다(화면 변경 알림과 달리).
+var powerPort: io_connect_t = 0
+var powerNotifier: io_object_t = 0
+var powerNotifyPort: IONotificationPortRef?
+powerPort = IORegisterForSystemPower(nil, &powerNotifyPort, { _, _, msgType, msgArg in
+  let willSleep: UInt32 = 0xE0000280, canSleep: UInt32 = 0xE0000270
+  if msgType == willSleep {
+    supervisor.pause(reason: "sleep")       // 시간축은 여기서 바로 멈춘다(스트림 해제는 비동기라도 이후 샘플은 버려짐)
+    IOAllowPowerChange(powerPort, Int(bitPattern: msgArg))
+  } else if msgType == canSleep {
+    IOAllowPowerChange(powerPort, Int(bitPattern: msgArg))
+  }
+}, &powerNotifier)
+if let np = powerNotifyPort {
+  CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(np).takeUnretainedValue(), .commonModes)
+}
+DistributedNotificationCenter.default().addObserver(forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { _ in
+  supervisor.pause(reason: "lock")
 }
 
 // 1초마다 화면 구성을 점검한다(꽂기·빼기·덮개·잠자기에서 깨어남).

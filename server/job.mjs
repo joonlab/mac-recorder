@@ -130,7 +130,13 @@ async function stackDisplays(dir, files, s, events) {
     const last = merged[merged.length - 1];
     if (last && last.active.map((m) => m.file).join() === g.active.map((m) => m.file).join()) last.b = g.b; else merged.push({ ...g });
   }
-  const W = Math.max(...merged.map((g) => g.active.reduce((n, m) => n + m.pw, 0))) & ~1;
+  // 합본 화면(캔버스)의 비율은 주 화면 하나의 비율. 화면이 하나뿐인 구간은 꽉 차고, 여러 개인 구간은 나란히 맞춰 넣는다.
+  // (예전에는 «모든 화면을 나란히 놓은» 가로로 긴 캔버스라, 화면이 하나 남으면 가운데에 작게 보였다 — 2026-11-18 피드백)
+  // 폭은 여러 화면을 나란히 놓았을 때의 폭(최대 3840)을 유지해 여러 화면 구간의 선명도도 지킨다.
+  const prim = meta.find((m) => m.role === 'primary') || meta[0];
+  const layoutW = Math.max(...merged.map((g) => g.active.reduce((n, m) => n + m.pw, 0)));
+  const W = Math.min(layoutW, 3840) & ~1;
+  const CH = Math.round(W / (prim.w / prim.h) / 2) * 2;
 
   // 각 파일을 [0, D] 전체를 덮는 고정 프레임 영상으로 만든 뒤(앞의 빈 곳은 검정, 화면이 그대로인 동안은 직전 장면) 구간마다 잘라 쓴다
   const args = ['-hide_banner', '-loglevel', 'error', '-y'];
@@ -148,16 +154,17 @@ async function stackDisplays(dir, files, s, events) {
   merged.forEach((g, j) => {
     const ins = g.active.map((m) => { const i = meta.indexOf(m); const lab = `c${i}_${used[i]++}`; parts.push(`[${lab}]trim=start=${g.a.toFixed(3)}:end=${g.b.toFixed(3)},setpts=PTS-STARTPTS[t${j}_${i}]`); return `[t${j}_${i}]`; });
     const lay = ins.length > 1 ? `${ins.join('')}hstack=inputs=${ins.length}` : `${ins[0]}null`;
-    parts.push(`${lay},scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1[g${j}]`);
+    parts.push(`${lay},scale=${W}:${CH}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${W}:${CH}:(ow-iw)/2:(oh-ih)/2:black,setsar=1[g${j}]`);
   });
   parts.push(`${merged.map((_, j) => `[g${j}]`).join('')}concat=n=${merged.length}:v=1:a=0[v]`);
   const out = path.join(dir, 'recording_all.mp4');
   const base = [...args, '-filter_complex', parts.join(';'), '-map', '[v]', '-map', `${meta.length}:a:0?`];
   const tail = ['-c:a', 'aac', '-b:a', '192k', '-t', D.toFixed(3), '-movflags', '+faststart', '-f', 'mp4', `${out}.part`];
-  try { await run('ffmpeg', [...base, '-c:v', 'h264_videotoolbox', '-b:v', '8M', ...tail], { timeout: 6 * 3600_000 }); }
+  const bitrate = W * CH > 4_000_000 ? '14M' : '8M';
+  try { await run('ffmpeg', [...base, '-c:v', 'h264_videotoolbox', '-b:v', bitrate, ...tail], { timeout: 6 * 3600_000 }); }
   catch { await run('ffmpeg', [...base, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', ...tail], { timeout: 6 * 3600_000 }); }
   fs.renameSync(`${out}.part`, out);
-  log(`stacked ${merged.map((g) => `${g.a.toFixed(1)}-${g.b.toFixed(1)}s[${g.active.map((m) => m.file).join('+')}]`).join(' ')} → recording_all.mp4`);
+  log(`canvas ${W}x${CH} · stacked ${merged.map((g) => `${g.a.toFixed(1)}-${g.b.toFixed(1)}s[${g.active.map((m) => m.file).join('+')}]`).join(' ')} → recording_all.mp4`);
   return merged.map((g) => ({ from: g.a, to: g.b, files: g.active.map((m) => m.file) }));
 }
 

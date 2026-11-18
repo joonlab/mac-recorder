@@ -70,6 +70,7 @@ function status() {
     ai: providerStatus(cfg),
     recordingsDir: cfg.recordingsDir,
     proposals: G.loadProposals().length,
+    displaysRev: S.displaysRev,
     port: cfg.port,
   };
 }
@@ -82,7 +83,15 @@ async function api(req, res, url) {
   const [a, b, c, d] = parts;
 
   if (a === 'status' && m === 'GET') return json(res, 200, status());
-  if (a === 'devices' && m === 'GET') return json(res, 200, await S.devices({ fresh: url.searchParams.get('fresh') === '1' }));
+  if (a === 'devices' && m === 'GET') return json(res, 200, { ...(await S.devices({ fresh: url.searchParams.get('fresh') === '1' })), rev: S.displaysRev });
+  if (a === 'displays-changed' && m === 'POST') {
+    // 메뉴바 앱이 macOS 화면 구성 변경 알림을 받으면 부른다 → 목록을 새로 읽어 displaysRev 를 올린다
+    const before = S.displaysRev;
+    await S.devices({ fresh: true });
+    // 막 연결된 모니터는 목록에 조금 늦게 잡힌다 → 그대로면 잠시 뒤 두 번 더 확인
+    if (S.displaysRev === before) for (const ms of [1500, 3500]) setTimeout(() => { S.devices({ fresh: true }).catch(() => {}); }, ms);
+    return json(res, 200, { ok: true, rev: S.displaysRev });
+  }
   if (a === 'permissions' && m === 'GET') return json(res, 200, await S.permissions());
   if (a === 'permissions' && b === 'request' && m === 'POST') return json(res, 200, await S.requestPermissions());
   if (a === 'permissions' && b === 'open-settings' && m === 'POST') {

@@ -65,6 +65,7 @@ $$('.tabs button').forEach((b) => b.addEventListener('click', () => showTab(b.da
 async function refreshStatus() {
   try {
     const s = await api('status');
+    if (state.status && s.displaysRev !== state.status.displaysRev) loadDevices();   // 모니터를 꽂거나 뺐다
     state.status = s;
     renderControl();
     const pill = $('#pill');
@@ -115,7 +116,8 @@ function renderControl() {
   const parts = [];
   if (r.video) parts.push('화면을 영상(mp4)으로');
   if (r.mic || r.system) parts.push(`${[r.mic && '마이크', r.system && '시스템 소리'].filter(Boolean).join('와 ')}를 함께`);
-  $('#srcHint').textContent = a ? (a.paused ? '일시정지 중에는 화면·소리를 전혀 녹화하지 않습니다. 다시 녹화하면 같은 파일에 이어집니다.' : '⌃⌥⌘P 로 일시정지, ⌃⌥⌘R 로 정지할 수 있습니다(메뉴바에서도).')
+  const why = { sleep: '맥이 잠자기에 들어가 자동으로 일시정지했습니다. ', lock: '화면이 잠겨 자동으로 일시정지했습니다. ' }[a?.pauseReason] || '';
+  $('#srcHint').textContent = a ? (a.paused ? `${why}일시정지 중에는 화면·소리를 전혀 녹화하지 않습니다. «다시 녹화»를 누르면 같은 파일에 이어집니다.` : '⌃⌥⌘P 로 일시정지, ⌃⌥⌘R 로 정지할 수 있습니다(메뉴바에서도).')
     : (r.video ? `${parts.join(' ')} 녹화합니다.` : `${[r.mic && '마이크', r.system && '시스템 소리'].filter(Boolean).join('와 ')}만 오디오(m4a)로 녹음합니다.`)
       + (r.system ? '' : ' 화상회의 상대 목소리도 남기려면 «시스템 소리»를 켜세요.');
 }
@@ -126,7 +128,12 @@ async function loadDevices(fresh = false) {
     const ds = state.devices.displays || [];
     $('#selDisplay').innerHTML = `<option value="all">${ds.length > 1 ? `전체 화면 (${ds.length}개)` : '주 화면'}</option>`
       + (ds.length > 1 ? ds.map((d) => `<option value="${d.id}">${esc(d.name)}${d.main ? ' (주)' : ''}</option>`).join('') : '');
-    $('#selDisplay').value = String(r.display || 'all');
+    const want = String(r.display || 'all');
+    if (want !== 'all' && !ds.some((d) => String(d.id) === want)) {
+      // 고른 화면이 지금 연결돼 있지 않다 → 선택은 남겨 두고 표시만(녹화하면 남은 화면으로 녹화된다)
+      $('#selDisplay').insertAdjacentHTML('beforeend', `<option value="${esc(want)}">선택했던 화면 (연결 안 됨)</option>`);
+    }
+    $('#selDisplay').value = want;
     const ms = state.devices.mics || [];
     $('#selMic').innerHTML = `<option value="">시스템 기본 (${esc(ms.find((m) => m.default)?.name || '-')})</option>`
       + ms.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join('');
@@ -186,7 +193,7 @@ const EV = {
   'display-lost': (n) => `${n} 분리 — 이 화면만 일시정지, 녹화는 계속`,
   'display-resumed': (n) => `${n} 다시 연결 — 이어서 녹화`,
   'display-added': (n) => `${n} 새로 연결 — 녹화에 추가`,
-  paused: () => '일시정지',
+  paused: (n, e) => ({ sleep: '잠자기로 자동 일시정지', lock: '화면 잠금으로 자동 일시정지' }[e?.detail] || '일시정지'),
   resumed: (n, e) => `다시 녹화${e?.detail ? ` (${e.detail.replace('초 멈춤', '')}초 동안 멈춤)` : ''}`,
 };
 function evText(e, startIso) {
@@ -517,4 +524,6 @@ $('#resetPrompt').addEventListener('click', async () => { const r = await api('p
     if (busy || Date.now() % 10000 < 2000) loadSessions();
   }, 2000);
   window.addEventListener('focus', () => { loadSessions(); loadDevices(true); });
+  // 메뉴바 앱이 없을 때를 위한 보조 확인: 대시보드가 보이는 동안 10초마다 화면 목록을 새로 읽는다
+  setInterval(() => { if (document.visibilityState === 'visible' && !state.status?.active) loadDevices(true); }, 10000);
 })();

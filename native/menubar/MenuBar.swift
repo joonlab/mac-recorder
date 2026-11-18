@@ -43,6 +43,7 @@ final class Model: ObservableObject {
   @Published var recording = false
   @Published var starting = false
   @Published var paused = false
+  @Published var pauseReason: String? = nil
   @Published var elapsed = 0
   @Published var video = true
   @Published var mic = true
@@ -62,6 +63,15 @@ final class Model: ObservableObject {
     Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
       Task { @MainActor in self?.poll() }
     }
+    // 모니터를 꽂거나 빼면 바로 서버에 알린다 → 대시보드가 새로고침 없이 화면 목록을 다시 읽는다
+    NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+      Task { @MainActor in
+        // 화면 목록이 자리 잡을 때까지 잠깐 기다린다(연결 직후엔 아직 안 보일 수 있다)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        _ = try? await Api.call("displays-changed", method: "POST", body: [:], timeout: 15)
+        await self?.loadDevices()
+      }
+    }
     poll()
   }
 
@@ -76,6 +86,7 @@ final class Model: ObservableObject {
           elapsed = a["elapsedSec"] as? Int ?? 0
           starting = (a["state"] as? String) == "starting"
           paused = a["paused"] as? Bool ?? false
+          pauseReason = a["pauseReason"] as? String
           notice = Model.noticeText((a["events"] as? [[String: Any]])?.last)
         } else { recording = false; elapsed = 0; starting = false; paused = false; notice = nil }
         if let r = s["record"] as? [String: Any] {
@@ -242,6 +253,9 @@ struct MenuContent: View {
       Divider()
     } else if m.recording {
       Text(m.starting ? "● 녹화 시작 중…" : (m.paused ? "⏸ 일시정지 \(m.elapsedText) — 지금은 녹화되지 않음" : "● 녹화 중 \(m.elapsedText) — \(m.sourcesText)"))
+      if m.paused, let r = m.pauseReason, r != "manual" {
+        Text(r == "sleep" ? "↳ 잠자기로 자동 일시정지됨 — «다시 녹화»를 누르면 이어집니다" : "↳ 화면 잠금으로 자동 일시정지됨 — «다시 녹화»를 누르면 이어집니다")
+      }
       if let n = m.notice, !m.paused { Text("↳ \(n)") }
       Button(m.paused ? "다시 녹화" : "일시정지") { m.togglePause() }.keyboardShortcut("p", modifiers: [.control, .option, .command])
       Button("녹화 정지") { m.toggle() }.keyboardShortcut("r", modifiers: [.control, .option, .command])

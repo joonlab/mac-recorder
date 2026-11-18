@@ -90,12 +90,25 @@ async function captureQuery(mode, timeoutMs = 10000) {
   throw new Error(`캡처 앱 응답 없음(${mode})`);
 }
 
+// 화면·마이크 목록. 모니터를 꽂거나 빼면 displaysRev 가 올라가고, 대시보드는 그 값이 바뀌면 목록을 다시 읽는다.
 let devCache = { at: 0, value: null };
+let devSig = '';
+export let displaysRev = 0;
+let devInflight = null;
 export async function devices({ fresh = false } = {}) {
   if (!fresh && devCache.value && Date.now() - devCache.at < 30000) return devCache.value;
-  const v = await captureQuery('--list');
-  devCache = { at: Date.now(), value: v };
-  return v;
+  if (devInflight) return devInflight;
+  devInflight = (async () => {
+    try {
+      const v = await captureQuery('--list');
+      const sig = JSON.stringify((v.displays || []).map((d) => [d.id, d.width, d.height, d.main]))
+        + JSON.stringify((v.mics || []).map((m) => m.id));
+      if (sig !== devSig) { devSig = sig; displaysRev += 1; }
+      devCache = { at: Date.now(), value: v };
+      return v;
+    } finally { devInflight = null; }
+  })();
+  return devInflight;
 }
 export const permissions = () => captureQuery('--check');
 export const requestPermissions = () => captureQuery('--request', 180000);
@@ -111,7 +124,7 @@ export function getActive() {
     const now = Date.now();
     const pausedNow = cap?.paused && cap?.pausedSince ? now - new Date(cap.pausedSince).getTime() : 0;
     const recordedSec = Math.max(0, Math.round((now - new Date(a.startedAt).getTime() - pausedNow) / 1000 - (cap?.pausedTotalSec || 0)));
-    return { ...a, state: cap?.state || 'starting', paused: !!cap?.paused, recordedSec, error: cap?.error || null,
+    return { ...a, state: cap?.state || 'starting', paused: !!cap?.paused, pauseReason: cap?.paused ? (cap?.pauseReason || 'manual') : null, recordedSec, error: cap?.error || null,
       events: (cap?.events || []).filter((e) => e.type !== 'start').slice(-5) };
   }
   // 프로세스가 사라졌다 = 잠자기·오류·외부 종료로 끝남 → 마무리 잡을 띄우고 진행 중 표시를 지운다
