@@ -109,6 +109,7 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapt
 - Raycast 를 쓰면: Raycast 설정 → Extensions → Script Commands → Add Directories → `<설치 위치>/raycast`
 - 녹화는 `~/Movies/MacRecorder` 에 저장되고 이 맥 밖으로 나가지 않습니다. 요약 AI 를 켜면 전사 글만 그 AI 로 갑니다.
 - 업데이트: Claude Code 에 «https://github.com/joonlab/mac-recorder 최신 버전으로 업데이트해 줘» 또는 터미널에서 `macrec update`
+- 브라우저 탭만 녹화하려면 크롬 확장: 아래 «크롬 확장(탭 녹화) 설치 돕기»
 
 ## 업데이트
 
@@ -128,4 +129,16 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapt
    0.2.0 이상이 설치돼 있으면 `~/.local/bin/macrec update` 한 줄로 같은 일을 합니다.
 4. **권한.** 설치 출력에 «처음 한 번 권한 허용이 필요합니다»가 있으면 녹화 엔진이 바뀐 것입니다. 위 5절(권한 허용)과 똑같이 진행합니다. 이 문구가 없으면 권한은 그대로입니다.
 5. **확인.** 6절의 시험 녹화와 `macrec doctor` 를 실행합니다.
-6. **알리기.** `<설치 위치>/CHANGELOG.md` 에서 이전 버전 이후 바뀐 내용을 두세 줄로 요약해 사용자에게 알려 줍니다.
+6. **알리기.** `<설치 위치>/CHANGELOG.md` 에서 이전 버전 이후 바뀐 내용을 두세 줄로 요약해 사용자에게 알려 줍니다. 0.4.0 미만에서 올라왔으면 크롬 확장(탭 녹화)이 생겼다고 알리고, 사용자가 원하면 아래 «크롬 확장(탭 녹화) 설치 돕기»를 진행합니다.
+
+## 크롬 확장(탭 녹화) 설치 돕기
+
+사용자가 «크롬 확장 설치», «탭 녹화»를 부탁하면 (0.4.0 부터). 확장 설치는 브라우저 화면에서 사용자가 직접 눌러야 하므로, 에이전트는 폴더를 열고 순서를 안내합니다. 사용자 브라우저를 대신 조작하지 않습니다.
+
+1. `~/.local/bin/macrec extension` — Finder 에 `<설치 위치>/extension` 폴더를 열고 설치 순서를 출력합니다. 출력의 순서를 그대로 보여 줍니다.
+2. 사용자가 쓰는 브라우저를 물어 주소를 알려 줍니다: Chrome `chrome://extensions` · Edge `edge://extensions` · Brave `brave://extensions` · Arc `arc://extensions`. «개발자 모드» 켜기 → «압축해제된 확장 프로그램을 로드합니다» → 위 폴더.
+3. 이미 설치돼 있으면(업데이트한 경우) 확장 관리 페이지에서 «MacRecorder 탭 녹화»의 새로고침(↻)을 한 번 누르라고 안내합니다.
+4. 확인: 녹화할 탭에서 확장 아이콘 → «이 탭 녹화» → 몇 초 뒤 정지. `macrec list -n 1` 에 그 탭 제목으로 녹화가 생기면 됩니다. 시험 녹화는 사용자에게 지울지 물어봅니다.
+5. Safari 는 확장을 쓸 수 없습니다. Safari 창은 대시보드 «창·탭 따로 녹화 → 창 고르기»로 녹화합니다(소리는 맥 전체 소리).
+
+자세한 내용: `docs/EXTENSION.md`
