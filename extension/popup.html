@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>MacRecorder 탭 녹화</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="icons/icon32.png" alt="" width="20" height="20">
+    <strong>MacRecorder 탭 녹화</strong>
+    <a id="dash" href="#" class="link">대시보드</a>
+  </header>
+
+  <div id="serverOff" class="notice warn" hidden>
+    MacRecorder 서버가 꺼져 있습니다. 맥에서 MacRecorder 를 켠 뒤 다시 열어 주세요.
+    <div class="small">찾는 주소: <span id="serverAddr"></span></div>
+  </div>
+
+  <section id="current">
+    <div class="tabtitle" id="curTitle">-</div>
+    <div id="curIdle">
+      <label class="row"><input type="checkbox" id="mic"> 마이크도 같이 녹음</label>
+      <div class="row" id="micRow">
+        <select id="micSel"></select>
+      </div>
+      <div id="micPerm" class="notice" hidden>
+        마이크 이름을 보려면 먼저 허용이 필요합니다. <a href="#" id="micPermBtn" class="link">마이크 허용</a>
+      </div>
+      <button id="startBtn" class="primary">이 탭 녹화</button>
+      <div id="curNote" class="small"></div>
+    </div>
+    <div id="curRec" hidden>
+      <div class="status"><span class="dot"></span><span id="curState"></span> <span id="curTime" class="mono"></span></div>
+      <div class="buttons">
+        <button id="pauseBtn"></button>
+        <button id="stopBtn" class="danger">정지</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="others" hidden>
+    <h2>녹화 중인 탭</h2>
+    <ul id="list"></ul>
+  </section>
+
+  <div id="err" class="notice warn" hidden></div>
+
+  <details id="settings">
+    <summary>설정</summary>
+    <label class="row">서버 포트 <input id="port" type="number" min="1" max="65535"></label>
+    <div class="small">MacRecorder 대시보드 주소의 포트와 같게 맞춥니다(기본 7931).</div>
+  </details>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

@@ -69,8 +69,11 @@ async function refreshStatus() {
     state.status = s;
     renderControl();
     const pill = $('#pill');
-    if (s.active) { pill.className = s.active.paused ? 'pill' : 'pill rec'; pill.textContent = `${s.active.paused ? '⏸ 일시정지' : '● 녹화 중'} ${hms(s.active.elapsedSec)}`; }
+    const nLive = (s.live || []).length;
+    if (s.active) { pill.className = s.active.paused ? 'pill' : 'pill rec'; pill.textContent = `${s.active.paused ? '⏸ 일시정지' : '● 녹화 중'} ${hms(s.active.elapsedSec)}${nLive ? ` · 창·탭 ${nLive}` : ''}`; }
+    else if (nLive) { pill.className = 'pill rec'; pill.textContent = `● 창·탭 ${nLive}개 녹화 중`; }
     else { pill.className = 'pill'; pill.textContent = '대기 중'; }
+    renderLive();
     const b = $('#propBadge'); b.hidden = !s.proposals; b.textContent = s.proposals;
     renderBanners();
   } catch {
@@ -120,6 +123,7 @@ function renderControl() {
   $('#srcHint').textContent = a ? (a.paused ? `${why}일시정지 중에는 화면·소리를 전혀 녹화하지 않습니다. «다시 녹화»를 누르면 같은 파일에 이어집니다.` : '⌃⌥⌘P 로 일시정지, ⌃⌥⌘R 로 정지할 수 있습니다(메뉴바에서도).')
     : (r.video ? `${parts.join(' ')} 녹화합니다.` : `${[r.mic && '마이크', r.system && '시스템 소리'].filter(Boolean).join('와 ')}만 오디오(m4a)로 녹음합니다.`)
       + (r.system ? '' : ' 화상회의 상대 목소리도 남기려면 «시스템 소리»를 켜세요.');
+  if (state.devices) renderMicHint();
 }
 async function loadDevices(fresh = false) {
   try {
@@ -134,11 +138,30 @@ async function loadDevices(fresh = false) {
       $('#selDisplay').insertAdjacentHTML('beforeend', `<option value="${esc(want)}">선택했던 화면 (연결 안 됨)</option>`);
     }
     $('#selDisplay').value = want;
-    const ms = state.devices.mics || [];
-    $('#selMic').innerHTML = `<option value="">시스템 기본 (${esc(ms.find((m) => m.default)?.name || '-')})</option>`
-      + ms.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join('');
+    const ms = sortMics(state.devices.mics || []);
+    const def = ms.find((m) => m.default);
+    $('#selMic').innerHTML = `<option value="">시스템 기본 (${esc(def ? micLabel(def) : '-')})</option>`
+      + ms.map((m) => `<option value="${esc(m.id)}">${esc(micLabel(m))}</option>`).join('');
+    if (r.micId && !ms.some((m) => m.id === r.micId)) {
+      // 고른 마이크가 지금 연결돼 있지 않다(블루투스 이어폰을 껐을 때 등) → 선택은 남겨 두고 표시만
+      $('#selMic').insertAdjacentHTML('beforeend', `<option value="${esc(r.micId)}">선택했던 마이크 (연결 안 됨)</option>`);
+    }
     $('#selMic').value = r.micId || '';
+    renderMicHint();
   } catch (e) { $('#selDisplay').innerHTML = '<option value="all">주 화면</option>'; }
+}
+// 마이크 종류 표시: 블루투스 이어폰·노트북 내장·USB·가상 장치(Zoom·Teams·BlackHole)를 구분
+const MIC_KIND = { builtin: '내장', bluetooth: '블루투스', usb: 'USB', virtual: '가상 장치', aggregate: '묶음 장치', display: '모니터', thunderbolt: 'Thunderbolt' };
+const micLabel = (m) => `${m.name}${MIC_KIND[m.kind] ? ` · ${MIC_KIND[m.kind]}` : ''}`;
+const sortMics = (ms) => [...ms].sort((a, b) => (a.kind === 'virtual') - (b.kind === 'virtual'));
+function renderMicHint() {
+  const r = recOpts(); const ms = state.devices?.mics || [];
+  const cur = r.micId ? ms.find((m) => m.id === r.micId) : ms.find((m) => m.default);
+  let t = '';
+  if (r.micId && !cur) t = '고른 마이크가 지금 연결돼 있지 않습니다. 이대로 녹화하면 시스템 기본 마이크로 녹음하고 녹화 기록에 남깁니다.';
+  else if (cur?.kind === 'bluetooth') t = '블루투스 이어폰 마이크를 쓰는 동안에는 이어폰으로 듣는 소리 음질이 통화 수준으로 낮아집니다(macOS 블루투스 특성). 소리를 좋게 들어야 하면 노트북 마이크를 고르세요.';
+  else if (cur?.kind === 'virtual') t = '가상 장치는 Zoom·Teams 같은 앱이 만든 장치라 내 목소리가 들어가지 않을 수 있습니다.';
+  $('#micHint').textContent = r.mic ? t : '';
 }
 async function saveRecord(patch) {
   await api('config', { method: 'PUT', body: { record: patch } });
@@ -147,6 +170,8 @@ async function saveRecord(patch) {
 $$('#srcChips input').forEach((cb) => cb.addEventListener('change', () => saveRecord({ [cb.dataset.src]: cb.checked })));
 $('#selDisplay').addEventListener('change', (e) => saveRecord({ display: e.target.value }));
 $('#selMic').addEventListener('change', (e) => saveRecord({ micId: e.target.value }));
+// 목록을 열 때마다 마이크를 새로 읽는다(블루투스 이어폰을 방금 연결했을 수 있다)
+$('#selMic').addEventListener('mousedown', () => { if (Date.now() - (state.micAt || 0) > 3000) { state.micAt = Date.now(); loadDevices(true); } });
 $('#pauseBtn').addEventListener('click', async () => {
   try { const r = await api('pause', { body: {} }); toast(r.paused ? '일시정지했습니다. 이 동안은 녹화되지 않습니다.' : '다시 녹화합니다.'); }
   catch (e) { toast(e.message, 5000); }
@@ -162,10 +187,77 @@ $('#recBtn').addEventListener('click', async () => {
   await refreshStatus(); loadSessions();
 });
 
+// ── 창·탭 따로 녹화 ─────────────────────────────────────────────
+function renderLive() {
+  const live = state.status?.live || [];
+  const el = $('#liveList');
+  if (!live.length) { el.innerHTML = ''; return; }
+  el.innerHTML = live.map((e) => {
+    const name = e.kind === 'window' ? `🪟 ${esc(e.window?.app || '')} — ${esc(e.title || '')}` : `🌐 ${esc(e.title || '브라우저 탭')}`;
+    const why = { sleep: ' (잠자기로 자동 일시정지)', lock: ' (화면 잠금으로 자동 일시정지)' }[e.pauseReason] || '';
+    return `<div class="live ${e.paused ? 'paused' : ''}" data-id="${e.id}">
+      <span class="dot">●</span><span class="t" title="${esc(e.title || '')}">${name}</span>
+      <span class="muted">${e.paused ? `일시정지${why}` : hms(e.recordedSec)}${e.kind === 'tab' && e.cmd ? ' · 확장에 전달 중' : ''}</span>
+      <button class="ghost" data-a="pause">${e.paused ? '● 다시 녹화' : '⏸'}</button><button class="ghost" data-a="stop">■ 정지</button></div>`;
+  }).join('');
+  $$('#liveList .live button').forEach((b) => b.addEventListener('click', async () => {
+    const id = b.closest('.live').dataset.id;
+    try {
+      const r = await api(`live/${id}/${b.dataset.a}`, { body: {} });
+      toast(b.dataset.a === 'stop' ? '녹화를 멈췄습니다. 파일을 정리하는 중입니다.' : r.paused ? '일시정지했습니다.' : '다시 녹화합니다.');
+    } catch (e) { toast(e.message, 5000); }
+    refreshStatus(); loadSessions();
+  }));
+}
+let wins = [];
+async function loadWindows() {
+  $('#winList').innerHTML = '<div class="muted" style="padding:10px">창 목록을 읽는 중…</div>';
+  try { wins = (await api('windows')).windows; } catch (e) { $('#winList').innerHTML = `<div class="muted" style="padding:10px">⛔ ${esc(e.message)}</div>`; return; }
+  renderWindows();
+}
+function renderWindows() {
+  const q = $('#winSearch').value.trim().toLowerCase();
+  const busy = new Set((state.status?.live || []).filter((e) => e.kind === 'window').map((e) => e.window?.id));
+  const list = wins.filter((w) => !q || `${w.app} ${w.title}`.toLowerCase().includes(q));
+  const apps = [...new Set(list.map((w) => w.app))].sort((a, b) => a.localeCompare(b, 'ko'));
+  $('#winList').innerHTML = apps.map((app) => {
+    const ws = list.filter((w) => w.app === app).sort((a, b) => b.onScreen - a.onScreen);
+    return `<div class="app">${esc(app)}${ws[0].browser ? ' · 브라우저(맥 전체 소리)' : ''}</div>` + ws.map((w) => `
+      <label><input type="checkbox" value="${w.id}" ${busy.has(w.id) ? 'disabled' : ''}>
+        <span class="wt">${esc(w.title || '(제목 없음)')}</span>
+        <small>${busy.has(w.id) ? '녹화 중' : `${w.width}×${w.height}${w.onScreen ? '' : ' · 숨김·다른 데스크탑'}`}</small></label>`).join('');
+  }).join('') || '<div class="muted" style="padding:10px">녹화할 수 있는 창이 없습니다.</div>';
+  $$('#winList input').forEach((cb) => cb.addEventListener('change', () => { $('#winStart').disabled = !$$('#winList input:checked').length; }));
+  $('#winStart').disabled = true;
+}
+$('#pickWin').addEventListener('click', () => {
+  const p = $('#winPicker'); p.hidden = !p.hidden;
+  if (!p.hidden) { $('#winMic').checked = !!recOpts().mic; loadWindows(); }
+});
+$('#winClose').addEventListener('click', () => { $('#winPicker').hidden = true; });
+$('#winReload').addEventListener('click', loadWindows);
+$('#winSearch').addEventListener('input', renderWindows);
+$('#winStart').addEventListener('click', async () => {
+  const ids = $$('#winList input:checked').map((cb) => Number(cb.value));
+  $('#winStart').disabled = true; $('#winMsg').textContent = '시작하는 중…';
+  let ok = 0; const errs = [];
+  for (const windowId of ids) {
+    try { await api('windows/start', { body: { windowId, mic: $('#winMic').checked } }); ok++; }
+    catch (e) { errs.push(e.message); }
+  }
+  $('#winMsg').textContent = '';
+  toast(errs.length ? `${ok}개 시작 · 실패 ${errs.length}: ${errs[0]}` : `창 ${ok}개 녹화를 시작했습니다.`, errs.length ? 6000 : 3200);
+  if (ok) $('#winPicker').hidden = true;
+  refreshStatus(); loadSessions();
+});
+
 // ── 녹화 목록 ───────────────────────────────────────────────────
 function jobTag(s) {
   const j = s.job;
-  if (s.status === 'recording') return state.status?.active?.id === s.id && state.status.active.paused ? '<span class="tag">⏸ 일시정지</span>' : '<span class="tag err">● 녹화 중</span>';
+  if (s.status === 'recording') {
+    const a = state.status?.active?.id === s.id ? state.status.active : (state.status?.live || []).find((x) => x.id === s.id);
+    return a?.paused ? '<span class="tag">⏸ 일시정지</span>' : '<span class="tag err">● 녹화 중</span>';
+  }
   if (s.status === 'failed') return '<span class="tag err">실패</span>';
   if (j && (j.status === 'running' || j.status === 'queued')) return `<span class="tag run">${esc(j.step || '처리 중')}${j.progress != null ? ` ${j.progress}%` : ''}</span>`;
   const t = [];
@@ -195,6 +287,12 @@ const EV = {
   'display-added': (n) => `${n} 새로 연결 — 녹화에 추가`,
   paused: (n, e) => ({ sleep: '잠자기로 자동 일시정지', lock: '화면 잠금으로 자동 일시정지' }[e?.detail] || '일시정지'),
   resumed: (n, e) => `다시 녹화${e?.detail ? ` (${e.detail.replace('초 멈춤', '')}초 동안 멈춤)` : ''}`,
+  'window-lost': () => '창 녹화가 잠시 끊김 — 다시 연결',
+  'window-resumed': () => '창 녹화 다시 연결',
+  'window-closed': () => '녹화하던 창이 닫혀 녹화를 마침',
+  'mic-fallback': () => '고른 마이크가 없어 시스템 기본 마이크로 녹음',
+  'tab-lost': () => '브라우저와 연결이 끊겨 녹화를 마침',
+  ended: () => '탭 녹화가 끊겨(탭을 닫거나 페이지 이동) 녹화를 마침',
 };
 function evText(e, startIso) {
   const t = startIso ? hms((new Date(e.at) - new Date(startIso)) / 1000) : new Date(e.at).toLocaleTimeString('ko-KR');
@@ -202,9 +300,11 @@ function evText(e, startIso) {
   const tt = typeof e.t === 'number' ? hms(e.t) : t;
   return `${/paused|resumed/.test(e.type) ? tt : t} · ${(EV[e.type] || ((n) => `${e.type} ${n}`))(e.name || '화면', e)}`;
 }
-function icon(s) { return s.sources?.video ? '🖥' : '🎙'; }
+function icon(s) { return s.kind === 'window' ? '🪟' : s.kind === 'tab' ? '🌐' : s.sources?.video ? '🖥' : '🎙'; }
 function srcText(s) {
-  return [s.sources?.video && '화면', s.sources?.mic && '마이크', s.sources?.system && '시스템 소리'].filter(Boolean).join('·');
+  const v = s.kind === 'window' ? `창(${s.window?.app || '?'})` : s.kind === 'tab' ? '브라우저 탭' : '화면';
+  const sys = s.kind === 'window' ? (s.window?.audio === 'app' ? '앱 소리' : '맥 전체 소리') : s.kind === 'tab' ? '탭 소리' : '시스템 소리';
+  return [s.sources?.video && v, s.sources?.mic && '마이크', s.sources?.system && sys].filter(Boolean).join('·');
 }
 async function loadSessions() {
   try { state.sessions = (await api('sessions')).sessions; } catch { return; }
@@ -213,7 +313,7 @@ async function loadSessions() {
 }
 function renderSessions() {
   const q = $('#search').value.trim().toLowerCase();
-  const list = state.sessions.filter((s) => !q || `${s.title} ${s.id} ${when(s.createdAt)}`.toLowerCase().includes(q));
+  const list = state.sessions.filter((s) => !q || `${s.title} ${s.id} ${s.folder || ''} ${s.window?.app || ''} ${when(s.createdAt)}`.toLowerCase().includes(q));
   if (!list.length) {
     $('#sessions').innerHTML = `<div class="empty">${q ? '검색 결과가 없습니다.' : '아직 녹화가 없습니다.<br>위의 빨간 버튼이나 메뉴바 아이콘으로 시작해 보세요.'}</div>`;
     return;
@@ -254,7 +354,7 @@ function renderDrawer() {
   const { session: s } = detail;
   $('#dTitle').value = s.title || '';
   $('#dTitle').placeholder = when(s.createdAt);
-  $('#dMeta').textContent = `${when(s.createdAt)} · ${hms(s.durationSec)} · ${srcText(s)} · ${bytes(s.bytes)}`;
+  $('#dMeta').textContent = `${when(s.createdAt)} · ${hms(s.durationSec)} · ${srcText(s)} · ${bytes(s.bytes)} · 폴더 ${s.folder || s.id}`;
   const p = $('#dPlayer');
   if (s.play) {
     p.innerHTML = s.playKind === 'audio'
@@ -479,7 +579,53 @@ async function loadSettings() {
   $('#openRec').addEventListener('click', () => api('open', { body: { what: 'recordings' } }));
   $('#openCfg').addEventListener('click', () => api('open', { body: { what: 'settings-folder' } }));
   $('#tsCmd').textContent = `tailscale serve --bg --https=${c.port + 1000} http://127.0.0.1:${c.port}`;
+  $('#recDir').value = c.recordingsDir; $('#recDirWarn').textContent = '';
+  $('#namingPattern').value = c.naming?.pattern || '{date}_{time}_{title}';
+  previewNaming();
 }
+// ── 녹화 폴더 바꾸기 ────────────────────────────────────────────
+async function checkRecDir() {
+  const p = $('#recDir').value.trim(); if (!p) return;
+  try { const r = await api(`recordings-dir/check?path=${encodeURIComponent(p)}`); $('#recDirWarn').innerHTML = r.warnings.map((w) => `⚠️ ${esc(w)}`).join('<br>'); } catch {}
+}
+$('#recDir').addEventListener('change', checkRecDir);
+$('#recDirPick').addEventListener('click', async () => {
+  toast('Finder 창에서 폴더를 고르세요(다른 창 뒤에 떠 있을 수 있습니다).', 5000);
+  const r = await api('recordings-dir/pick', { body: {} });
+  if (r.path) { $('#recDir').value = r.path; checkRecDir(); }
+});
+$('#recDirSave').addEventListener('click', async () => {
+  const p = $('#recDir').value.trim();
+  const cur = state.config?.recordingsDir;
+  if (!p || p === cur) return toast('지금 폴더와 같습니다.');
+  const n = state.sessions.length;
+  const chk = await api(`recordings-dir/check?path=${encodeURIComponent(p)}`).catch(() => ({ warnings: [] }));
+  if (chk.warnings.length && !confirm(`${chk.warnings.join('\n\n')}\n\n그래도 이 폴더로 바꿀까요?`)) return;
+  const move = n > 0 && confirm(`지금 폴더의 녹화 ${n}개를 새 폴더로 옮길까요?\n\n[확인] 옮기기  ·  [취소] 옮기지 않기(옮기지 않으면 기존 녹화는 대시보드 목록에서 보이지 않고, 지금 폴더에 그대로 남습니다)`);
+  try {
+    const r = await api('recordings-dir', { body: { path: p, move } });
+    toast(`녹화 폴더를 바꿨습니다${move ? ` · ${r.moved}개 옮김${r.failed?.length ? `, 실패 ${r.failed.length}` : ''}` : ''}.`, 5000);
+    await loadSettings(); loadSessions(); refreshStatus();
+  } catch (e) { toast(e.message, 6000); }
+});
+// ── 폴더 이름 규칙 ──────────────────────────────────────────────
+let namingT;
+async function previewNaming() {
+  const pat = $('#namingPattern').value.trim() || '{date}_{time}_{title}';
+  try { const r = await api(`naming/preview?pattern=${encodeURIComponent(pat)}`); $('#namingPreview').innerHTML = `예: <span class="mono">${esc(r.sample)}</span> · 제목이 없으면 <span class="mono">${esc(r.untitled)}</span>`; } catch {}
+}
+$('#namingPattern').addEventListener('input', () => { clearTimeout(namingT); namingT = setTimeout(previewNaming, 250); });
+$('#namingSave').addEventListener('click', async () => {
+  await api('config', { method: 'PUT', body: { naming: { pattern: $('#namingPattern').value.trim() || '{date}_{time}_{title}' } } });
+  toast('저장했습니다. 다음 녹화부터 이 규칙을 씁니다.');
+});
+$('#namingApply').addEventListener('click', async () => {
+  await api('config', { method: 'PUT', body: { naming: { pattern: $('#namingPattern').value.trim() || '{date}_{time}_{title}' } } });
+  if (!confirm(`기존 녹화 ${state.sessions.length}개의 폴더 이름을 이 규칙으로 바꿀까요? (녹화·처리 중인 것은 끝난 뒤 바뀝니다)`)) return;
+  const r = await api('naming/apply', { body: {} });
+  toast(`${r.renamed}개 이름을 바꿨습니다${r.pending ? ` · ${r.pending}개는 처리가 끝난 뒤` : ''}.`, 5000);
+  loadSessions();
+});
 function showProv() {
   const v = $('#providers input:checked')?.value;
   $$('.prov-detail').forEach((d) => d.classList.toggle('on', d.dataset.for === v));

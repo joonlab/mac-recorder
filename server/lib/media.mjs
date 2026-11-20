@@ -25,11 +25,11 @@ const TYPES = {
 };
 export const contentType = (f) => TYPES[path.extname(f).toLowerCase()] || 'application/octet-stream';
 
-export function serveFile(req, res, file, { download = false } = {}) {
+export function serveFile(req, res, file, { download = false, downloadName = null } = {}) {
   let st;
   try { st = fs.statSync(file); } catch { res.writeHead(404); return res.end('not found'); }
   const headers = { 'Content-Type': contentType(file), 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' };
-  if (download) headers['Content-Disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(file))}`;
+  if (download) headers['Content-Disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(downloadName || path.basename(file))}`;
   const m = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
   if (m && (m[1] || m[2])) {
     let start = m[1] ? Number(m[1]) : st.size - Number(m[2]);

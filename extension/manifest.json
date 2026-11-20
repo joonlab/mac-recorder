@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "MacRecorder 탭 녹화",
+  "description": "브라우저 탭 하나의 화면과 소리를 녹화해 MacRecorder 에 저장합니다. 여러 탭을 동시에 녹화할 수 있습니다.",
+  "version": "0.4.0",
+  "minimum_chrome_version": "116",
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "action": {
+    "default_title": "MacRecorder 탭 녹화",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" }
+  },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "permissions": ["tabCapture", "offscreen", "storage", "activeTab"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"]
+}

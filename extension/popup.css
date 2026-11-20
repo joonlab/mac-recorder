@@ -1,0 +1,32 @@
+:root { color-scheme: light dark; --fg: #111; --muted: #6b7280; --line: #e5e7eb; --bg: #fff; --red: #dc2626; --warn: #92400e; --warnbg: #fef3c7; }
+@media (prefers-color-scheme: dark) { :root { --fg: #eee; --muted: #9ca3af; --line: #374151; --bg: #1f2937; --warnbg: #3b2f12; --warn: #fcd34d; } }
+* { box-sizing: border-box; }
+body { width: 320px; margin: 0; padding: 12px; font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif; color: var(--fg); background: var(--bg); }
+header { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+header strong { flex: 1; }
+.link { color: #2563eb; text-decoration: none; cursor: pointer; }
+.link:hover { text-decoration: underline; }
+section { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+.tabtitle { font-weight: 600; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+select, input[type=number] { flex: 1; min-width: 0; padding: 4px; font: inherit; }
+button { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--fg); cursor: pointer; }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { width: 100%; margin-top: 6px; background: var(--red); border-color: var(--red); color: #fff; font-weight: 600; }
+button.danger { color: var(--red); border-color: var(--red); }
+.buttons { display: flex; gap: 6px; margin-top: 8px; }
+.buttons button { flex: 1; }
+.status { display: flex; align-items: center; gap: 6px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--red); }
+.paused .dot { background: var(--muted); }
+.mono { font-variant-numeric: tabular-nums; color: var(--muted); }
+.small { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.notice { font-size: 12px; padding: 8px; border-radius: 6px; margin: 6px 0; border: 1px solid var(--line); }
+.notice.warn { background: var(--warnbg); color: var(--warn); border-color: transparent; }
+h2 { font-size: 12px; margin: 0 0 6px; color: var(--muted); font-weight: 600; }
+ul { list-style: none; margin: 0; padding: 0; }
+li { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--line); }
+li:first-child { border-top: 0; }
+li .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+li button { padding: 2px 6px; font-size: 12px; }
+details summary { cursor: pointer; color: var(--muted); font-size: 12px; }

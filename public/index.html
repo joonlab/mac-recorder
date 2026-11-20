@@ -38,6 +38,23 @@
             <label>마이크 <select id="selMic"></select></label>
           </div>
           <div class="hint" id="srcHint"></div>
+          <div class="hint" id="micHint"></div>
+        </div>
+      </div>
+
+      <div class="card" id="srcCard">
+        <div class="card-head"><h2>창·탭 따로 녹화</h2><button class="ghost" id="pickWin">창 고르기</button></div>
+        <p class="muted">모니터 전체 대신 창 하나만 녹화합니다. 여러 창을 동시에 녹화할 수 있고, 창마다 녹화가 따로 저장됩니다. 다른 창에 가려져도 그 창 내용이 녹화됩니다. 창을 최소화한 동안에는 마지막 장면이 멈춘 채 남고, 되살리면 이어집니다. 창을 닫으면 그 녹화가 끝납니다.</p>
+        <div id="liveList"></div>
+        <div id="winPicker" hidden>
+          <div class="row wrap" style="margin:8px 0">
+            <label class="chip"><input type="checkbox" id="winMic"> 마이크도 같이</label>
+            <input id="winSearch" type="search" placeholder="앱·창 이름 검색" style="flex:1;min-width:160px">
+            <button class="ghost" id="winReload">새로고침</button>
+          </div>
+          <div id="winList" class="winlist"></div>
+          <div class="row" style="margin-top:8px"><button id="winStart" disabled>고른 창 녹화 시작</button><button class="ghost" id="winClose">닫기</button><span class="muted" id="winMsg"></span></div>
+          <p class="muted">소리: 일반 앱 창은 그 앱 소리만 담습니다. 브라우저 창은 macOS 가 탭 소리를 앱 단위로 내주지 않아 맥 전체 소리로 녹음합니다. 브라우저 탭 하나의 화면과 소리만 담으려면 <a href="https://github.com/joonlab/mac-recorder/blob/main/docs/EXTENSION.md" target="_blank" rel="noopener">크롬 확장(탭 녹화)</a>을 쓰세요.</p>
         </div>
       </div>
 
@@ -159,11 +176,22 @@
       <div class="card">
         <h2>저장 위치·접속</h2>
         <div id="paths" class="muted"></div>
+        <div class="grid2" style="margin-top:10px">
+          <label>녹화 폴더 <input id="recDir" class="mono" placeholder="~/Movies/MacRecorder"></label>
+          <div class="row" style="align-items:flex-end"><button class="ghost" id="recDirPick">Finder 에서 고르기</button><button id="recDirSave">바꾸기</button></div>
+        </div>
+        <div id="recDirWarn" class="muted"></div>
         <details><summary>폰이나 다른 맥에서 대시보드 열기 (Tailscale)</summary>
           <p>이 서버는 보안을 위해 이 맥 안(127.0.0.1)에서만 열립니다. Tailscale 을 쓰고 있다면 터미널에서 아래 한 줄로 내 기기들에게만 열 수 있습니다.</p>
           <pre id="tsCmd"></pre>
           <p>그다음 설정 파일(<code>~/.mac-recorder/config.json</code>)의 <code>allowedHosts</code> 에 <code>"*.ts.net"</code> 을 넣고 서버를 다시 시작하세요.</p>
         </details>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>녹화 폴더 이름 규칙</h2><div class="row"><button class="ghost" id="namingApply">기존 녹화에도 적용</button><button id="namingSave">저장</button></div></div>
+        <p class="muted"><code>{date}</code> 20261118 · <code>{time}</code> 1402 · <code>{hms}</code> 140215 · <code>{title}</code> 제목 · <code>{kind}</code> 화면·창·탭 · <code>{sources}</code> 화면+소리+마이크 · <code>{app}</code> 창 녹화한 앱. 제목이 나중에 정해지면(직접 고치거나 AI 요약) 처리가 끝난 뒤 폴더 이름도 바뀝니다. 대시보드에서 내려받는 파일도 이 이름을 씁니다(예: <span class="mono">20261118_1402_OO교육.mp4</span>, <span class="mono">…_전사.md</span>).</p>
+        <label class="field">규칙 <input id="namingPattern" class="mono" placeholder="{date}_{time}_{title}"></label>
+        <div class="muted" id="namingPreview"></div>
       </div>
     </section>
   </main>

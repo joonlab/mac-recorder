@@ -57,6 +57,14 @@ const HELP = `macrec — MacRecorder
   macrec toggle
   macrec status [--json]
 
+창·탭 따로 녹화 (여러 개 동시)
+  macrec windows [검색어] [--json]       녹화할 수 있는 창 목록(ID·앱·제목)
+  macrec start --window <ID>[,<ID>…] [--mic] [--audio app|system|none] [--title "제목"]
+                                        창마다 따로 녹화. 소리는 생략하면 일반 앱=그 앱 소리, 브라우저=맥 전체 소리
+  macrec live [--json]                  진행 중인 창·탭 녹화
+  macrec stop <ID|all>                  창·탭 녹화 정지(ID 없이 'macrec stop' 은 주 녹화)
+  macrec pause <ID> | resume <ID>       창·탭 녹화 일시정지·다시 녹화
+
 녹화 목록·파일
   macrec list [-n 10] [--json]
   macrec show [ID|latest] [--json]      파일 경로·전사·요약 상태
@@ -81,13 +89,38 @@ const HELP = `macrec — MacRecorder
   macrec version                        버전과 설치 위치
   macrec permissions [--request]        권한 확인 / 요청 창 띄우기
   macrec logs                           서버 로그 위치
+  macrec extension                      탭 녹화 크롬 확장 설치 안내(폴더 열기)
 `;
 
 async function main() {
   switch (cmd) {
     case 'help': case '-h': case '--help': console.log(HELP); return;
 
+    case 'windows': {
+      const q = (pos[0] || '').toLowerCase();
+      const list = (await api('windows')).windows.filter((w) => !q || `${w.app} ${w.title}`.toLowerCase().includes(q));
+      return out(list, list.map((w) => `${String(w.id).padStart(7)}  ${w.app}${w.browser ? '(브라우저)' : ''} — ${w.title || '(제목 없음)'}${w.onScreen ? '' : '  [숨김·다른 데스크탑]'}`).join('\n') || '창이 없습니다.');
+    }
+    case 'live': {
+      const list = (await api('live')).live;
+      return out(list, list.map((e) => `${e.id}  ${e.paused ? '⏸' : '●'} ${hms(e.recordedSec)}  ${e.kind === 'window' ? `창 ${e.window?.app} — ` : '탭 '}${e.title || ''}`).join('\n') || '진행 중인 창·탭 녹화가 없습니다.');
+    }
     case 'start': {
+      if (flagVal('--window')) {
+        const ids = String(flagVal('--window')).split(',').map((x) => Number(x.trim())).filter(Boolean);
+        const res = [];
+        for (const windowId of ids) {
+          const body = { windowId };
+          if (flags.has('--mic')) body.mic = true;
+          if (flags.has('--no-mic')) body.mic = false;
+          if (flagVal('--audio')) body.audio = flagVal('--audio');
+          if (flagVal('--title')) body.title = ids.length > 1 ? `${flagVal('--title')} ${res.length + 1}` : flagVal('--title');
+          try { const r = await api('windows/start', { body }); res.push(r); console.error(`● 창 녹화 시작 ${r.id} — ${r.window.app} «${r.window.title}» (소리: ${{ app: '그 앱', system: '맥 전체', none: '없음' }[r.audio]})`); }
+          catch (e) { console.error(`⛔ 창 ${windowId}: ${e.message}`); process.exitCode = 1; }
+        }
+        if (JSONOUT) console.log(JSON.stringify(res, null, 2));
+        return;
+      }
       const body = {};
       if (flags.has('--no-video') || flags.has('--audio-only')) body.video = false;
       if (flags.has('--video')) body.video = true;
@@ -99,8 +132,20 @@ async function main() {
       const r = await api('start', { body });
       return out(r, `● 녹화 시작 ${r.id} (${[r.sources.video && '화면', r.sources.mic && '마이크', r.sources.system && '시스템 소리'].filter(Boolean).join('·')})`);
     }
-    case 'stop': { const r = await api('stop', { body: {} }); return out(r, `■ 녹화 정지 ${r.id} — 파일 정리 후 목록에 나타납니다.`); }
+    case 'stop': {
+      if (pos[0]) {
+        const ids = pos[0] === 'all' ? (await api('live')).live.map((e) => e.id) : [pos[0]];
+        for (const id of ids) { await api(`live/${id}/stop`, { body: {} }); console.log(`■ 정지 ${id}`); }
+        if (!ids.length) console.log('진행 중인 창·탭 녹화가 없습니다.');
+        return;
+      }
+      const r = await api('stop', { body: {} }); return out(r, `■ 녹화 정지 ${r.id} — 파일 정리 후 목록에 나타납니다.`);
+    }
     case 'pause': case 'resume': case 'pause-toggle': {
+      if (pos[0]) {
+        const r = await api(`live/${pos[0]}/pause`, { body: cmd === 'pause-toggle' ? {} : { paused: cmd === 'pause' } });
+        return out(r, `${r.paused ? '⏸ 일시정지' : '● 다시 녹화'} ${r.id}${r.pending ? ' (확장이 5초 안에 받아 갑니다)' : ''}`);
+      }
       const r = await api('pause', { body: cmd === 'pause-toggle' ? {} : { paused: cmd === 'pause' } });
       return out(r, r.paused ? `⏸ 일시정지 ${r.id} — 이 동안은 아무것도 녹화되지 않습니다. 'macrec resume' 으로 이어서 녹화` : `● 다시 녹화 ${r.id}`);
     }
@@ -173,6 +218,18 @@ async function main() {
       return out({ version: ver, repo }, `MacRecorder ${ver}\n설치 위치 ${repo}`);
     }
     case 'update': return update();
+    case 'extension': {
+      const dir = path.join(repoDir(), 'extension');
+      try { execFileSync('open', ['-R', path.join(dir, 'manifest.json')]); } catch {}
+      return console.log(`탭 녹화 크롬 확장 폴더: ${dir}
+
+설치(한 번):
+  1. 브라우저에서 chrome://extensions 열기 (Edge: edge://extensions · Brave: brave://extensions · Arc: arc://extensions)
+  2. 오른쪽 위 «개발자 모드» 켜기
+  3. «압축해제된 확장 프로그램을 로드합니다» → 위 폴더 고르기 (Finder 에 열어 두었습니다)
+  4. 퍼즐 아이콘에서 «MacRecorder 탭 녹화» 고정
+업데이트한 뒤에는 확장 관리 페이지에서 이 확장의 새로고침(↻)을 한 번 누릅니다. 자세히: docs/EXTENSION.md`);
+    }
     default: console.log(HELP); process.exitCode = 64;
   }
 }

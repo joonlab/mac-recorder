@@ -17,7 +17,7 @@ MacRecorder 는 이 맥에서 화면·마이크·시스템 소리를 녹화하�
 ```bash
 macrec list            # 최근 10개 (ID · 길이 · 전사/요약 여부 · 제목)
 macrec show latest     # 가장 최근 녹화의 폴더·파일 경로
-macrec show 20261112   # ID 앞부분으로 찾기
+macrec show 20261112   # ID 앞부분으로 찾기 (ID 는 시작 시각. 폴더 이름은 «20261112_1500_제목» 처럼 규칙을 따른다 — 경로는 show 결과를 쓴다)
 ```
 
 녹화 폴더 안 파일:
@@ -62,7 +62,13 @@ macrec pause                 # 일시정지(멈춘 동안은 화면·소리 모�
 macrec resume                # 같은 파일에 이어서 녹화(멈춘 시간은 파일에서 빠짐)
 macrec stop
 macrec status
+# 창·탭 따로 녹화(여러 개 동시, 녹화마다 따로 저장)
+macrec windows [검색어]      # 창 목록(ID·앱·제목)
+macrec start --window <ID>[,<ID>] [--mic] [--audio app|system|none]
+macrec live                  # 진행 중인 창·탭 녹화
+macrec pause <녹화ID> / resume <녹화ID> / stop <녹화ID|all>
 ```
 
 권한 오류가 나면 `macrec permissions` → 시스템 설정에서 «MacRecorder Capture» 허용을 안내한다.
 문제가 있으면 `macrec doctor` 결과를 보고 판단한다.
+브라우저 탭 하나만 녹화하려면 크롬 확장을 쓴다(`macrec extension` 이 설치 순서를 보여 준다, 상세 `docs/EXTENSION.md`). 브라우저 창을 «창 녹화»하면 소리는 맥 전체 소리로 들어간다.

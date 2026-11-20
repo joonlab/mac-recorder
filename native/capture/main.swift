@@ -15,6 +15,9 @@
 //   --check            권한 상태를 JSON 으로 출력
 //   --request          권한 요청 대화상자를 띄우고 결과를 JSON 으로 출력
 //   --list             화면·마이크 목록을 JSON 으로 출력
+//   --list-windows     녹화할 수 있는 창 목록을 JSON 으로 출력
+//   --window-id <ID>   (녹화) 화면 대신 창 하나만 녹화. 소리는 --window-audio app(그 앱 소리) | system(맥 전체 소리)
+//                      브라우저는 소리를 별도 Helper 프로세스가 내서 app 으로는 담기지 않는다(실측) → 서버가 system 을 준다
 //   (기본)             녹화. SIGINT/SIGTERM 을 받으면 파일을 마무리하고 끝난다.
 // 출력은 --json-out <경로> 로 파일에 쓴다(open 으로 실행하면 stdout 을 받기 어렵다).
 import AppKit
@@ -40,6 +43,8 @@ var jsonOut: String? = nil
 var allDisplays = false   // --displays all : 연결된 화면 전부(녹화 중 새로 꽂은 화면 포함)
 var fallback = true       // --fallback 0 : 주 화면이 사라져도 다른 화면으로 옮기지 않음
 var mode = "record"
+var windowID: UInt32? = nil
+var windowAudio = "app"   // app | system
 
 do {
   let a = CommandLine.arguments
@@ -63,6 +68,9 @@ do {
     case "--json-out": jsonOut = next()
     case "--displays": allDisplays = next() == "all"
     case "--fallback": fallback = next() != "0"
+    case "--list-windows": mode = "list-windows"
+    case "--window-id": windowID = UInt32(next())
+    case "--window-audio": windowAudio = next() == "system" ? "system" : "app"
     default: break
     }
     i += 1
@@ -127,13 +135,68 @@ func displayList() -> [[String: Any]] {
   return out
 }
 
+/// 마이크 연결 방식(내장·블루투스·USB·가상 …). 블루투스 이어폰·노트북 마이크·가상 장치(Zoom·Teams·BlackHole)를 목록에서 구분하려고.
+func micKind(_ d: AVCaptureDevice) -> String {
+  let t = UInt32(bitPattern: d.transportType)
+  let code = String(bytes: [24, 16, 8, 0].map { UInt8((t >> $0) & 0xFF) }, encoding: .ascii) ?? ""
+  switch code {
+  case "bltn": return "builtin"
+  case "blue", "blea": return "bluetooth"
+  case "usb ": return "usb"
+  case "virt": return "virtual"
+  case "aggr", "grup": return "aggregate"
+  case "hdmi", "dprt": return "display"
+  case "thun": return "thunderbolt"
+  default: return "other"
+  }
+}
+func micDevices() -> [AVCaptureDevice] {
+  AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified).devices
+}
 func micList() -> [[String: Any]] {
-  let session = AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified)
   let def = AVCaptureDevice.default(for: .audio)?.uniqueID
-  return session.devices.map { ["id": $0.uniqueID, "name": $0.localizedName, "default": $0.uniqueID == def] }
+  return micDevices().map { ["id": $0.uniqueID, "name": $0.localizedName, "default": $0.uniqueID == def, "kind": micKind($0)] }
+}
+
+/// 브라우저 앱(소리를 Helper 프로세스가 낸다 → 창·앱 단위 소리 필터에 안 잡힘)
+let browserPrefixes = ["com.google.Chrome", "com.apple.Safari", "company.thebrowser.", "com.microsoft.edgemac", "com.brave.Browser",
+                       "org.mozilla.", "com.operasoftware.", "com.vivaldi.", "org.chromium.", "com.kagi.kagimacOS", "app.zen-browser"]
+func isBrowser(_ bundle: String) -> Bool { browserPrefixes.contains { bundle.hasPrefix($0) } }
+
+/// 녹화할 수 있는 창 목록. 메뉴·툴팁 같은 작은 창, 이름 없는 숨은 창, MacRecorder 자신은 뺀다.
+func windowList() async -> [String: Any] {
+  do {
+    let c = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+    let mine = Bundle.main.bundleIdentifier ?? "-"
+    var out: [[String: Any]] = []
+    for w in c.windows {
+      guard w.windowLayer == 0, let app = w.owningApplication, w.frame.width >= 160, w.frame.height >= 100 else { continue }
+      let bid = app.bundleIdentifier
+      if bid == mine || bid.hasPrefix("io.github.joonlab.macrecorder") || bid == "com.apple.WindowManager" || bid == "com.apple.dock" { continue }
+      let title = w.title ?? ""
+      if title.isEmpty && !w.isOnScreen { continue }
+      out.append(["id": Int(w.windowID), "app": app.applicationName, "bundleId": bid, "pid": Int(app.processID), "title": title,
+                  "width": Int(w.frame.width), "height": Int(w.frame.height), "onScreen": w.isOnScreen, "browser": isBrowser(bid)])
+    }
+    return ["ok": true, "windows": out]
+  } catch {
+    return ["ok": false, "error": "창 목록을 읽지 못했습니다(화면 기록 권한 확인): \(error.localizedDescription)", "windows": []]
+  }
+}
+
+/// 창이 아직 있는지(닫히면 ScreenCaptureKit 이 오류 없이 프레임만 끊는다 — 실측). 가볍게 CGWindowList 로 본다.
+/// .optionIncludingWindow 는 최소화한 창을 빼고 돌려줘서(실측) «닫힘»으로 잘못 본다 → 전체 목록(.optionAll)에서 찾는다.
+func windowExists(_ id: UInt32) -> Bool {
+  guard let arr = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else { return true }
+  return arr.contains { ($0[kCGWindowNumber as String] as? Int) == Int(id) }
 }
 
 if mode == "check" { emitJSON(permissionReport()); exit(0) }
+if mode == "list-windows" {
+  _ = NSApplication.shared
+  Task { emitJSON(await windowList()); exit(0) }
+  RunLoop.main.run()
+}
 if mode == "list" { emitJSON(["displays": displayList(), "mics": micList()]); exit(0) }
 if mode == "request" {
   // 화면 기록: 대화상자를 띄우고(처음 한 번), 허용 여부는 앱을 다시 실행해야 반영된다.
@@ -330,6 +393,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
   var finishing = false
   private let lock = NSLock()
   private var _stream: SCStream?
+  private var _aux: SCStream?     // 창 녹화 + 맥 전체 소리: 소리만 받는 두 번째 스트림(화면 필터)
   private var _currentID: UInt32?
   var lastError = ""
   var quietReconnect = false   // 일시정지에서 다시 시작할 때 다시 연결하는 건 «화면 변화»로 기록하지 않는다
@@ -337,8 +401,9 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
 
   var stream: SCStream? { lock.lock(); defer { lock.unlock() }; return _stream }
   var currentID: UInt32? { lock.lock(); defer { lock.unlock() }; return _currentID }
-  private func setActive(_ s: SCStream?, _ id: UInt32?) { lock.lock(); _stream = s; _currentID = id; lock.unlock() }
-  private func isActive(_ s: SCStream) -> Bool { lock.lock(); defer { lock.unlock() }; return _stream === s }
+  private func setActive(_ s: SCStream?, _ id: UInt32?, aux: SCStream? = nil) { lock.lock(); _stream = s; _currentID = id; _aux = aux; lock.unlock() }
+  private func isActive(_ s: SCStream) -> Bool { lock.lock(); defer { lock.unlock() }; return _stream === s || (_aux != nil && _aux === s) }
+  private var auxStream: SCStream? { lock.lock(); defer { lock.unlock() }; return _aux }
   var file: String { (path as NSString).lastPathComponent }
 
   init(_ role: Role, target: UInt32?, path: String, fallback: Bool) {
@@ -355,10 +420,11 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
     return ds.first { isBuiltin($0.displayID) } ?? ds.first { $0.displayID == CGMainDisplayID() } ?? ds.first
   }
 
-  private func makeWriter(_ d: SCDisplay) throws {
+  private func makeWriter(_ d: SCDisplay) throws { try makeWriter(px: pixelSize(d)) }
+  private func makeWriter(px: (Int, Int)) throws {
     guard writer == nil else { return }
     let video = wantVideo
-    if video { let (pw, ph) = pixelSize(d); (outW, outH) = scaledSize(pw, ph, scaleWidth) }
+    if video { (outW, outH) = scaledSize(px.0, px.1, scaleWidth) }
     try? FileManager.default.removeItem(atPath: path)
     let w = try AVAssetWriter(outputURL: URL(fileURLWithPath: path), fileType: video ? .mp4 : .m4a)
     if video {
@@ -389,6 +455,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
     let content: SCShareableContent
     do { content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) }
     catch { lastError = "화면 기록 권한이 없습니다. 시스템 설정 → 개인정보 보호 및 보안 → 화면 및 시스템 오디오 녹음에서 MacRecorder Capture 를 켜 주세요. (\(error.localizedDescription))"; return false }
+    if let wid = windowID { return await connectWindow(content, wid) }
     guard let d = pick(content.displays) else { lastError = "녹화할 화면이 없습니다"; return false }
     do {
       try makeWriter(d)
@@ -424,10 +491,53 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
     }
   }
 
+  /// 창 하나 녹화. 영상 = 그 창(가려지거나 다른 화면으로 옮겨도 그 창 내용), 소리 = 그 앱(app) 또는 맥 전체(system)
+  private func connectWindow(_ content: SCShareableContent, _ wid: UInt32) async -> Bool {
+    guard let w = content.windows.first(where: { $0.windowID == wid }) else { lastError = "녹화할 창이 없습니다(닫혔을 수 있음)"; return false }
+    do {
+      let filter = SCContentFilter(desktopIndependentWindow: w)
+      let scale = Double(filter.pointPixelScale)
+      let px = (Int((Double(filter.contentRect.width) * scale).rounded()), Int((Double(filter.contentRect.height) * scale).rounded()))
+      try makeWriter(px: px)
+      let cfg = SCStreamConfiguration()
+      cfg.width = outW; cfg.height = outH
+      cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+      cfg.scalesToFit = true; cfg.preservesAspectRatio = true   // 창 크기를 바꿔도 같은 파일 크기에 맞춰 넣는다
+      cfg.queueDepth = 8; cfg.showsCursor = true
+      let appAudio = wantSystem && windowAudio == "app"
+      if appAudio { cfg.capturesAudio = true; cfg.sampleRate = 48000; cfg.channelCount = 2; cfg.excludesCurrentProcessAudio = true }
+      if wantMic { cfg.captureMicrophone = true; if let m = micDeviceID { cfg.microphoneCaptureDeviceID = m } }
+      let s = SCStream(filter: filter, configuration: cfg, delegate: self)
+      try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
+      if appAudio { try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: q) }
+      if wantMic { try s.addStreamOutput(self, type: .microphone, sampleHandlerQueue: q) }
+      var aux: SCStream? = nil
+      if wantSystem && windowAudio == "system", let d = content.displays.first {
+        let ac = SCStreamConfiguration()
+        let (aw, ah) = scaledSize(d.width, d.height, 320); ac.width = aw; ac.height = ah
+        ac.minimumFrameInterval = CMTime(value: 1, timescale: 2)
+        ac.capturesAudio = true; ac.sampleRate = 48000; ac.channelCount = 2; ac.excludesCurrentProcessAudio = true
+        let a = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: ac, delegate: self)
+        try a.addStreamOutput(self, type: .audio, sampleHandlerQueue: q)
+        aux = a
+      }
+      setActive(s, nil, aux: aux)
+      do { try await s.startCapture(); if let a = aux { try await a.startCapture() } } catch { setActive(nil, nil); throw error }
+      log("window → \(wid) \(w.owningApplication?.applicationName ?? "?") «\(w.title ?? "")» \(cfg.width)x\(cfg.height) audio=\(wantSystem ? windowAudio : "none") file=\(file)")
+      return true
+    } catch {
+      lastError = error.localizedDescription
+      log("window connect error: \(error.localizedDescription)")
+      return false
+    }
+  }
+
   func disconnect() async {
     guard let s = stream else { return }
+    let a = auxStream
     setActive(nil, nil)
     try? await s.stopCapture()
+    if let a { try? await a.stopCapture() }
   }
 
   private var lastVideoPTS = CMTime.invalid
@@ -492,6 +602,13 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
     // 화면이 빠지거나(-3815 등) 잠자기로 스트림이 끊겼다. 녹화를 끝내지 않고 감시자에게 맡긴다.
     guard isActive(s) else { return }
     let was = currentID
+    if windowID != nil {
+      // 창 녹화: 두 스트림을 함께 끊고, 감시자가 창이 남아 있으면 다시 연결·없으면 녹화를 끝낸다
+      Task { await self.disconnect() }
+      event("window-lost", nil, error.localizedDescription, file: file)
+      DispatchQueue.main.async { supervisor.kick() }
+      return
+    }
     setActive(nil, nil)
     event(role == .primary ? "primary-lost" : "display-lost", was, error.localizedDescription, file: file)
     appendBlank()
@@ -559,6 +676,20 @@ final class Supervisor {
   }
 
   @MainActor func tick() async {
+    if let wid = windowID {
+      // 창 녹화: 화면 변화는 상관없다. 창이 닫히면 녹화를 끝내고, 끊겨 있으면 다시 연결한다.
+      let c = primary
+      if !windowExists(wid) {
+        if c.stream != nil { await c.disconnect() }
+        event("window-closed", nil, "녹화하던 창이 닫혔습니다", file: c.file)
+        finish(reason: "window-closed")
+        return
+      }
+      if c.stream == nil, await c.connect() {
+        if c.quietReconnect { c.quietReconnect = false } else { event("window-resumed", nil, file: c.file) }
+      }
+      return
+    }
     let online = Set(onlineDisplayIDs())
     for id in online { rememberName(id) }
     refreshNames(online)
@@ -651,18 +782,39 @@ let supervisor = Supervisor()
 // MARK: - 시작
 
 statusBase = ["out": outPath, "startedAt": iso.string(from: Date()), "video": wantVideo, "mic": wantMic, "system": wantSystem]
+// 고른 마이크가 지금 연결돼 있지 않으면(블루투스 이어폰을 껐을 때 등) 시스템 기본 마이크로 녹음하고 기록에 남긴다
+var micNote = ""
+if wantMic {
+  let devs = micDevices()
+  if let m = micDeviceID, !devs.contains(where: { $0.uniqueID == m }) {
+    micNote = "선택한 마이크가 연결돼 있지 않아 시스템 기본 마이크로 녹음합니다"
+    log("mic \(m) not found → default")
+    micDeviceID = nil
+  }
+  let used = micDeviceID.flatMap { id in devs.first { $0.uniqueID == id } } ?? AVCaptureDevice.default(for: .audio)
+  if let u = used { statusBase["micName"] = u.localizedName; statusBase["micKind"] = micKind(u) }
+}
+if let wid = windowID {
+  _ = NSApplication.shared   // 창 단위 필터는 WindowServer 연결이 초기화돼 있어야 한다(없으면 CGS_REQUIRE_INIT 로 죽음, 실측)
+  var info: [String: Any] = ["id": Int(wid), "audio": wantSystem ? windowAudio : "none"]
+  if let arr = CGWindowListCopyWindowInfo([.optionIncludingWindow], CGWindowID(wid)) as? [[String: Any]], let w = arr.first {
+    info["app"] = w[kCGWindowOwnerName as String] as? String ?? ""
+    info["title"] = w[kCGWindowName as String] as? String ?? ""
+  }
+  statusBase["window"] = info
+}
 writeStatus("starting")
 
 // 주 녹화 대상: 화면을 지정했으면 그 화면, «전체 화면»이면 가장 빠지지 않는 내장 화면(없으면 주 디스플레이).
 // 이전에는 «주 디스플레이»(대개 외장 모니터)에 소리를 실어서, HDMI 를 빼면 녹화 전체가 끝났다.
 let online0 = onlineDisplayIDs()
 var primaryTarget: UInt32? = displayID
-if displayID == nil && wantVideo {
+if displayID == nil && wantVideo && windowID == nil {
   primaryTarget = online0.first(where: isBuiltin) ?? (online0.contains(CGMainDisplayID()) ? CGMainDisplayID() : online0.first)
 }
 for id in online0 { _ = displayName(id) }
 supervisor.captures.append(Capture(.primary, target: primaryTarget, path: outPath, fallback: fallback))
-if allDisplays && wantVideo {
+if allDisplays && wantVideo && windowID == nil {
   for id in online0 where id != primaryTarget {
     supervisor.captures.append(Capture(.extra, target: id, path: (outDir as NSString).appendingPathComponent("display-\(id).mp4"), fallback: false))
   }
@@ -720,6 +872,7 @@ Task { @MainActor in
     exit(2)
   }
   event("start", p.currentID, file: p.file)
+  if !micNote.isEmpty { event("mic-fallback", nil, micNote) }
   for c in supervisor.captures.dropFirst() { if await c.connect() { event("start", c.currentID, file: c.file) } }
   supervisor.writeLive()
 }

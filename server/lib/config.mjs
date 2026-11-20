@@ -45,6 +45,8 @@ export const DEFAULTS = {
     autoSummarize: false,
     llmCorrection: true, // 요약 제공자가 있으면 요약 전에 사전·맥락으로 전사 교정
   },
+  // 녹화 폴더 이름 규칙. 토큰 {date} {time} {hms} {title} {kind} {sources} {app} {id}. 내려받기 파일 이름도 이 이름을 쓴다
+  naming: { pattern: '{date}_{time}_{title}' },
   context: '', // 내 맥락: 소속·자주 나오는 사람/제품 이름 등. 교정·요약 프롬프트에 들어간다
 };
 

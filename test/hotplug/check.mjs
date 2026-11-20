@@ -5,7 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 const id = process.argv[2];
 const cfg = (() => { try { return JSON.parse(fs.readFileSync(path.join(os.homedir(), '.mac-recorder/config.json'), 'utf8')); } catch { return {}; } })();
-const dir = path.join((cfg.recordingsDir || '~/Movies/MacRecorder').replace(/^~/, os.homedir()), id);
+// 폴더 이름은 이름 규칙(예: 20261118_1402_제목)을 따르므로 서버에 물어 찾는다(서버가 없으면 예전 이름 «ID»)
+const root = (cfg.recordingsDir || '~/Movies/MacRecorder').replace(/^~/, os.homedir());
+const dir = await fetch(`http://127.0.0.1:${cfg.port || 7931}/api/sessions/${id}`).then((r) => r.json()).then((j) => j.session?.dir).catch(() => null) || path.join(root, id);
 const s = JSON.parse(fs.readFileSync(path.join(dir, 'session.json'), 'utf8'));
 const dur = (f, sel = '') => {
   try { return Number(execFileSync('ffprobe', ['-v', 'error', ...(sel ? ['-select_streams', sel] : []), '-show_entries', sel ? 'stream=duration' : 'format=duration', '-of', 'csv=p=0', path.join(dir, f)], { encoding: 'utf8' }).trim().split('\n')[0]).toFixed(1); } catch { return '-'; }

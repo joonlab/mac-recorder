@@ -65,6 +65,7 @@ function status() {
   return {
     ok: true, version: VERSION, now: new Date().toISOString(),
     active: active ? { ...active, elapsedSec: active.recordedSec ?? Math.round(elapsed) } : null,
+    live: S.listLive(),
     record: cfg.record,
     whisper: whisperStatus(),
     ai: providerStatus(cfg),
@@ -75,7 +76,7 @@ function status() {
   };
 }
 
-const ALLOWED_CONFIG = ['record', 'transcribe', 'ai', 'context', 'recordingsDir', 'allowedHosts'];
+const ALLOWED_CONFIG = ['record', 'transcribe', 'ai', 'context', 'allowedHosts', 'naming'];
 
 async function api(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean).slice(1); // ['sessions', id, ...]
@@ -113,6 +114,40 @@ async function api(req, res, url) {
     return json(res, 200, { ok: true, action: 'started', ...(await S.startRecording(await body(req))) });
   }
 
+  // 창 녹화(여러 개 동시) — 녹화 엔진을 창마다 하나씩
+  if (a === 'windows' && !b && m === 'GET') return json(res, 200, { windows: await S.listWindows() });
+  if (a === 'windows' && b === 'start' && m === 'POST') return json(res, 200, { ok: true, ...(await S.startWindowRecording(await body(req))) });
+  // 진행 중인 창·탭 녹화
+  if (a === 'live' && !b && m === 'GET') return json(res, 200, { live: S.listLive() });
+  if (a === 'live' && b && (c === 'stop' || c === 'pause') && m === 'POST') {
+    const p = await body(req);
+    return json(res, 200, { ok: true, ...S.controlLive(b, c, c === 'pause' ? p.paused : undefined) });
+  }
+  // 탭 녹화(크롬 확장) — 확장이 녹화 조각을 올린다
+  if (a === 'tabs') {
+    if (b === 'start' && m === 'POST') return json(res, 200, { ok: true, ...S.startTabRecording(await body(req)) });
+    if (b && c === 'chunk' && m === 'POST') return json(res, 200, await S.appendTabChunk(b, url.searchParams.get('seq'), req));
+    if (b && c === 'state' && m === 'POST') return json(res, 200, S.tabState(b, await body(req)));
+    if (b && c === 'stop' && m === 'POST') return json(res, 200, S.stopTab(b, await body(req)));
+  }
+  // 파일 이름 규칙
+  if (a === 'naming' && b === 'preview' && m === 'GET') {
+    const pattern = url.searchParams.get('pattern') || loadConfig().naming?.pattern;
+    const sample = { id: '20261118-140215', createdAt: new Date(2026, 10, 18, 14, 2, 15).toISOString(), title: 'OO교육', sources: { video: true, mic: true, system: true } };
+    return json(res, 200, { pattern, sample: S.ruleName(sample, pattern), untitled: S.ruleName({ ...sample, title: '' }, pattern) });
+  }
+  if (a === 'naming' && b === 'apply' && m === 'POST') return json(res, 200, { ok: true, ...S.applyNamingAll() });
+  // 녹화 폴더 바꾸기
+  if (a === 'recordings-dir' && !b && m === 'POST') {
+    const p = await body(req);
+    return json(res, 200, { ok: true, ...(await S.changeRecordingsDir(p.path, { move: !!p.move })) });
+  }
+  if (a === 'recordings-dir' && b === 'pick' && m === 'POST') return json(res, 200, await S.pickFolder());
+  if (a === 'recordings-dir' && b === 'check' && m === 'GET') {
+    const p = String(url.searchParams.get('path') || '').replace(/^~(?=\/|$)/, os.homedir());
+    return json(res, 200, { path: p, warnings: S.folderWarnings(p), exists: fs.existsSync(p), count: S.listSessions().length });
+  }
+
   if (a === 'sessions') {
     if (!b && m === 'GET') return json(res, 200, { sessions: S.listSessions() });
     if (b && !S.isId(b)) return json(res, 400, { error: '잘못된 녹화 ID' });
@@ -127,11 +162,15 @@ async function api(req, res, url) {
     if (b && !c && m === 'PATCH') {
       const p = await body(req);
       const next = S.updateSession(b, (cur) => ({ ...cur, ...(typeof p.title === 'string' ? { title: p.title.trim().slice(0, 120) } : {}), ...(typeof p.note === 'string' ? { note: p.note } : {}) }));
-      return json(res, 200, { ok: true, session: next });
+      // 제목이 바뀌면 폴더 이름도 규칙대로(녹화·처리 중이면 끝난 뒤)
+      let naming = null;
+      if (typeof p.title === 'string') { try { naming = S.applyNaming(b); } catch (e) { naming = { error: e.message }; } }
+      return json(res, 200, { ok: true, session: next, naming });
     }
     if (b && !c && m === 'DELETE') return json(res, 200, { ok: true, ...(await S.deleteSession(b)) });
     if (c === 'file' && d && (m === 'GET' || m === 'HEAD')) {
-      return serveFile(req, res, S.safeFile(b, decodeURIComponent(d)), { download: url.searchParams.get('download') === '1' });
+      const name = decodeURIComponent(d);
+      return serveFile(req, res, S.safeFile(b, name), { download: url.searchParams.get('download') === '1', downloadName: S.downloadName(b, name) });
     }
     if (c === 'reveal' && m === 'POST') { await S.reveal(b, (await body(req)).file); return json(res, 200, { ok: true }); }
     if (['transcribe', 'pipeline', 'correct', 'summarize'].includes(c) && m === 'POST') {
@@ -226,7 +265,7 @@ const server = http.createServer(async (req, res) => {
     if (!f.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); }
     return serveFile(req, res, f);
   } catch (e) {
-    const code = /없습니다|없음|잘못|필요|켜 주세요|이미|지울 수/.test(e.message) ? 400 : 500;
+    const code = e.status || (/없습니다|없음|잘못|필요|켜 주세요|이미|지울 수|아닙니다|바꿀 수|쓸 수 없|적어 주세요|옮기세요/.test(e.message) ? 400 : 500);
     if (code === 500) console.error(new Date().toISOString(), req.method, req.url, e.stack || e);
     return json(res, code, { error: e.message });
   }

@@ -34,6 +34,10 @@ struct Api {
 
 struct Device: Identifiable, Hashable { let id: String; let name: String; let main: Bool }
 struct Recent: Identifiable, Hashable { let id: String; let title: String }
+/// 녹화할 수 있는 창
+struct Win: Identifiable, Hashable { let id: Int; let app: String; let title: String; let browser: Bool }
+/// 진행 중인 창·탭 녹화
+struct Live: Identifiable, Hashable { let id: String; let label: String; let paused: Bool; let elapsed: Int }
 
 // MARK: - 상태
 
@@ -57,6 +61,9 @@ final class Model: ObservableObject {
   @Published var lastError: String? = nil
   @Published var proposals = 0
   @Published var notice: String? = nil   // 녹화 중 화면 변화(모니터 분리 등) 마지막 기록
+  @Published var live: [Live] = []
+  @Published var windows: [Win] = []
+  private var windowsAt = Date.distantPast
   private var tick = 0
 
   init() {
@@ -95,6 +102,13 @@ final class Model: ObservableObject {
           micId = r["micId"] as? String ?? ""
         }
         proposals = s["proposals"] as? Int ?? 0
+        live = (s["live"] as? [[String: Any]] ?? []).compactMap { e in
+          guard let id = e["id"] as? String else { return nil }
+          let w = e["window"] as? [String: Any]
+          let t = e["title"] as? String ?? ""
+          let label = (e["kind"] as? String) == "window" ? "창 · \(w?["app"] as? String ?? "") — \(t)" : "탭 · \(t)"
+          return Live(id: id, label: String(label.prefix(60)), paused: e["paused"] as? Bool ?? false, elapsed: e["recordedSec"] as? Int ?? 0)
+        }
         if tick == 1 || tick % 5 == 0 { await loadRecents() }
         if tick == 1 || tick % 120 == 0 || displays.isEmpty { await loadDevices() }
       } catch {
@@ -144,9 +158,52 @@ final class Model: ObservableObject {
     displays = (j["displays"] as? [[String: Any]] ?? []).map {
       Device(id: String(describing: $0["id"] ?? ""), name: $0["name"] as? String ?? "화면", main: $0["main"] as? Bool ?? false)
     }
-    mics = (j["mics"] as? [[String: Any]] ?? []).map {
-      Device(id: $0["id"] as? String ?? "", name: $0["name"] as? String ?? "마이크", main: $0["default"] as? Bool ?? false)
+    let kinds = ["builtin": "내장", "bluetooth": "블루투스", "usb": "USB", "virtual": "가상 장치", "aggregate": "묶음 장치", "display": "모니터", "thunderbolt": "Thunderbolt"]
+    mics = (j["mics"] as? [[String: Any]] ?? [])
+      .sorted { (($0["kind"] as? String) == "virtual" ? 1 : 0) < (($1["kind"] as? String) == "virtual" ? 1 : 0) }
+      .map {
+        let k = kinds[$0["kind"] as? String ?? ""].map { " · \($0)" } ?? ""
+        return Device(id: $0["id"] as? String ?? "", name: ($0["name"] as? String ?? "마이크") + k, main: $0["default"] as? Bool ?? false)
+      }
+  }
+
+  /// 메뉴를 열 때 창 목록을 읽는다(3초 안에 다시 열면 그대로)
+  func loadWindows(force: Bool = false) {
+    guard force || Date().timeIntervalSince(windowsAt) > 3 else { return }
+    windowsAt = Date()
+    Task {
+      guard let j = try? await Api.call("windows", timeout: 15), let list = j["windows"] as? [[String: Any]] else { return }
+      windows = list.compactMap { w in
+        guard let id = w["id"] as? Int else { return nil }
+        let t = (w["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "(제목 없음)"
+        return Win(id: id, app: w["app"] as? String ?? "?", title: String(t.prefix(60)), browser: w["browser"] as? Bool ?? false)
+      }
     }
+  }
+  var windowApps: [String] { Array(Set(windows.map(\.app))).sorted() }
+
+  func startWindow(_ w: Win) {
+    Task {
+      do {
+        _ = try await Api.call("windows/start", method: "POST", body: ["windowId": w.id], timeout: 20)
+        NSSound(named: "Tink")?.play()
+      } catch {
+        NSSound.beep()
+        alert("창 녹화를 시작하지 못했습니다", error.localizedDescription)
+      }
+      poll()
+    }
+  }
+  func controlLive(_ id: String, _ action: String) {
+    Task {
+      _ = try? await Api.call("live/\(id)/\(action)", method: "POST", body: [:], timeout: 10)
+      NSSound(named: action == "stop" ? "Pop" : "Bottle")?.play()
+      poll()
+    }
+  }
+  static func clock(_ sec: Int) -> String {
+    let h = sec / 3600, m = (sec % 3600) / 60, s = sec % 60
+    return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%02d:%02d", m, s)
   }
 
   func toggle() {
@@ -247,6 +304,10 @@ struct MenuContent: View {
   @EnvironmentObject var m: Model
 
   var body: some View {
+    Group { items }.onAppear { m.loadWindows() }   // 메뉴가 열릴 때 창 목록을 새로 읽는다
+  }
+
+  @ViewBuilder var items: some View {
     if !m.online {
       Text("⚠️ 서버에 연결할 수 없음 (127.0.0.1:\(Api.port))")
       Button("서버 다시 시작") { m.restartServer() }
@@ -285,6 +346,31 @@ struct MenuContent: View {
       }
       Divider()
     }
+    if !m.live.isEmpty {
+      Text("창·탭 녹화 \(m.live.count)개")
+      ForEach(m.live) { e in
+        Menu("\(e.paused ? "⏸" : "●") \(Model.clock(e.elapsed))  \(e.label)") {
+          Button(e.paused ? "다시 녹화" : "일시정지") { m.controlLive(e.id, "pause") }
+          Button("정지") { m.controlLive(e.id, "stop") }
+        }
+      }
+      Divider()
+    }
+    if m.online {
+      Menu("창 하나만 녹화") {
+        if m.windows.isEmpty { Text("창 목록을 읽는 중…") }
+        ForEach(m.windowApps, id: \.self) { app in
+          let ws = m.windows.filter { $0.app == app }
+          Menu(app + (ws.first?.browser == true ? " (맥 전체 소리)" : "")) {
+            ForEach(ws) { w in Button(w.title) { m.startWindow(w) } }
+          }
+        }
+        Divider()
+        Button("창 목록 새로고침") { m.loadWindows(force: true) }
+        Button("여러 창 고르기 (대시보드)") { m.open() }
+      }
+      Divider()
+    }
     if !m.recents.isEmpty {
       Menu("최근 녹화") {
         ForEach(m.recents) { r in Button(r.title) { m.open("#s=\(r.id)") } }
@@ -298,6 +384,7 @@ struct MenuContent: View {
     Button("MacRecorder 메뉴 닫기") { NSApp.terminate(nil) }
   }
 }
+
 
 @main
 struct MacRecorderApp: App {
@@ -314,8 +401,10 @@ struct MacRecorderApp: App {
         .onAppear { HotKey.onPress = { [weak model] in model?.toggle() }; HotKey.onPause = { [weak model] in model?.togglePause() } }
     } label: {
       HStack(spacing: 3) {
-        Image(nsImage: IconArt.menuBar(recording: model.recording, paused: model.paused, pulse: !model.paused && model.elapsed % 2 == 1))
+        Image(nsImage: IconArt.menuBar(recording: model.recording || !model.live.isEmpty, paused: model.recording ? model.paused : model.live.allSatisfy(\.paused),
+                                       pulse: !model.paused && (model.recording ? model.elapsed : (model.live.first?.elapsed ?? 0)) % 2 == 1))
         if model.recording { Text(model.elapsedText).monospacedDigit() }
+        else if !model.live.isEmpty { Text("창·탭 \(model.live.count)").monospacedDigit() }
       }
       .task { HotKey.onPress = { [weak model] in model?.toggle() }; HotKey.onPause = { [weak model] in model?.togglePause() } }
     }

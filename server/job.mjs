@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { P, REPO, ensureHome, loadConfig } from './lib/config.mjs';
-import { readSession, sessionDir, updateSession } from './lib/sessions.mjs';
+import { applyNaming, readSession, sessionDir, updateSession } from './lib/sessions.mjs';
 import { probe } from './lib/media.mjs';
 import { alive, run, sleep } from './lib/util.mjs';
 import { transcribeSession, whisperStatus } from './lib/transcribe.mjs';
@@ -46,7 +46,47 @@ async function withLock(fn) {
   try { return await fn(); } finally { try { if (Number(fs.readFileSync(LOCK, 'utf8')) === process.pid) fs.rmSync(LOCK, { force: true }); } catch {} }
 }
 
+/** 탭 녹화(크롬 확장이 올린 webm) → recording.mp4. 영상이 H.264 면 다시 압축하지 않고 옮겨 담기만 한다. */
+async function finalizeTab() {
+  setJob({ status: 'running', step: '탭 녹화 파일 변환 중' });
+  const src = path.join(dir, 'tab.webm');
+  const out = path.join(dir, 'recording.mp4');
+  if (!fs.existsSync(src) || fs.statSync(src).size < 1000) {
+    updateSession(id, { status: 'failed', error: '탭 녹화 조각을 받지 못했습니다' });
+    setJob({ status: 'error', error: '탭 녹화 파일 없음', endedAt: new Date().toISOString() });
+    return false;
+  }
+  let vcodec = '';
+  try {
+    const { stdout } = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', src], { timeout: 60000 });
+    vcodec = stdout.trim();
+  } catch {}
+  // MediaRecorder 의 webm 은 길이·시각 정보가 비어 있다 → genpts 로 다시 매기고, 고정 프레임으로 바꾸지 않는다(멈춘 화면은 그대로)
+  const head = ['-hide_banner', '-loglevel', 'error', '-y', '-fflags', '+genpts', '-i', src];
+  const tail = ['-c:a', 'aac', '-b:a', '160k', '-ar', '48000', '-movflags', '+faststart', '-f', 'mp4', `${out}.part`];
+  const tries = vcodec === 'h264' ? [['-c:v', 'copy']] : [];
+  tries.push(['-c:v', 'h264_videotoolbox', '-b:v', '6M', '-pix_fmt', 'yuv420p'], ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p']);
+  let ok = false;
+  for (const v of tries) {
+    try { await run('ffmpeg', [...head, ...v, ...tail], { timeout: 6 * 3600_000 }); ok = true; break; }
+    catch (e) { log('변환 실패, 다음 방법으로', v.join(' '), String(e.stderr || e.message).slice(-300)); }
+  }
+  if (!ok) {
+    updateSession(id, { status: 'failed', error: '탭 녹화 파일을 mp4 로 바꾸지 못했습니다(tab.webm 은 남겨 둠)' });
+    setJob({ status: 'error', error: 'mp4 변환 실패', endedAt: new Date().toISOString() });
+    return false;
+  }
+  fs.renameSync(`${out}.part`, out);
+  const info = await probe(out);
+  // 변환이 끝나고 길이가 맞으면 원본 webm 은 지운다(같은 내용이 mp4 에 있다)
+  if (info.durationSec > 0) fs.rmSync(src, { force: true });
+  updateSession(id, { status: 'ready', media: 'recording.mp4', durationSec: Math.round(info.durationSec), audioTracks: info.audioTracks.length });
+  log(`tab ready ${Math.round(info.durationSec)}s codec=${vcodec} tracks=${info.audioTracks.length}`);
+  return info.audioTracks.length > 0;
+}
+
 async function finalize() {
+  if (readSession(id).kind === 'tab') return finalizeTab();
   setJob({ status: 'running', step: '녹화 파일 마무리 중' });
   let cap = {};
   const readCap = () => { try { cap = JSON.parse(fs.readFileSync(path.join(dir, 'capture.json'), 'utf8')); } catch {} };
@@ -225,6 +265,8 @@ async function main() {
     const s = readSession(id);
     if (s.job?.status !== 'error') setJob({ status: 'done', step: null, progress: null, endedAt: new Date().toISOString(), error: null });
     log('done');
+    // 녹화 중·처리 중이라 미뤄 둔 폴더 이름 바꾸기(요약이 제목을 정한 경우 포함)
+    try { const r = applyNaming(id, { self: true }); if (r.renamed) log('folder →', r.name); } catch (e) { log('이름 바꾸기 실패', e.message); }
   } catch (e) {
     log('error', e.stack || e.message);
     if (current) setPart(current, { status: 'error', error: e.message });
