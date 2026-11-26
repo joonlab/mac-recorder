@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { P, REPO, VERSION, ensureHome, loadConfig, saveConfig, loadSecrets, saveSecrets, mask } from './lib/config.mjs';
+import { HOME, P, REPO, VERSION, ensureHome, loadConfig, saveConfig, loadSecrets, saveSecrets, mask } from './lib/config.mjs';
 import * as S from './lib/sessions.mjs';
 import { serveFile } from './lib/media.mjs';
 import { whisperStatus, readSegments, writeTranscript } from './lib/transcribe.mjs';
@@ -73,7 +73,42 @@ function status() {
     proposals: G.loadProposals().length,
     displaysRev: S.displaysRev,
     port: cfg.port,
+    menubar: menubarState(cfg),
   };
+}
+
+// ── 메뉴바 앱 ───────────────────────────────────────────────────
+// 메뉴바 앱이 꺼지면 아이콘과 단축키(⌃⌥⌘R·⌃⌥⌘P)가 함께 꺼진다. 대시보드는 이 상태를 보고 «다시 띄우기»를 보여 준다.
+const STARTED = Date.now();
+const menubar = { seenAt: 0, iconHidden: false, cmd: null };
+const menubarApp = (cfg) => path.join(path.dirname(cfg.captureApp), 'MacRecorder.app');
+function menubarState(cfg) {
+  let expected = true;   // 설치할 때 --no-menubar 를 줬으면 꺼져 있어도 알리지 않는다
+  try { expected = JSON.parse(fs.readFileSync(path.join(HOME, 'install.json'), 'utf8')).options?.menubar !== false; } catch {}
+  const running = Date.now() - menubar.seenAt < 5000;
+  return {
+    installed: fs.existsSync(menubarApp(cfg)), expected,
+    // 서버가 막 켜졌으면 메뉴바 앱이 아직 못 불렀을 수 있다 → 모름(null)
+    running: running ? true : Date.now() - STARTED < 8000 ? null : false,
+    iconHidden: running ? menubar.iconHidden : false,
+    app: menubarApp(cfg),
+  };
+}
+async function menubarAction(action) {
+  const cfg = loadConfig();
+  const st = menubarState(cfg);
+  if (action === 'hide') {
+    if (!st.running) throw new Error('메뉴바 앱이 꺼져 있습니다.');
+    menubar.cmd = 'hide';
+    return { how: 'signal' };
+  }
+  if (st.running) { menubar.cmd = 'show'; return { how: 'signal' }; }
+  if (!st.installed) throw new Error(`메뉴바 앱이 없습니다: ${st.app} (install.sh 를 다시 실행하세요)`);
+  const { run } = await import('./lib/util.mjs');
+  // -g: 다른 창 앞으로 튀어나오지 않게. --show: 아이콘을 숨긴 채 꺼졌어도 보이게 켠다
+  const env = HOME !== path.join(os.homedir(), '.mac-recorder') ? ['--env', `MACREC_HOME=${HOME}`] : [];
+  await run('open', ['-g', ...env, st.app, '--args', '--show'], { timeout: 15000 });
+  return { how: 'launched' };
 }
 
 const ALLOWED_CONFIG = ['record', 'transcribe', 'ai', 'context', 'allowedHosts', 'naming'];
@@ -83,7 +118,16 @@ async function api(req, res, url) {
   const m = req.method;
   const [a, b, c, d] = parts;
 
-  if (a === 'status' && m === 'GET') return json(res, 200, status());
+  if (a === 'status' && m === 'GET') {
+    // 메뉴바 앱은 1초마다 ?menubar=1&icon=0|1 로 부른다 → 살아 있는지·아이콘을 숨겼는지 안다. 서버가 보낼 명령(show·hide)은 menubarCmd 로 받아 간다
+    if (url.searchParams.get('menubar') === '1') {
+      menubar.seenAt = Date.now(); menubar.iconHidden = url.searchParams.get('icon') === '0';
+      const cmd = menubar.cmd; menubar.cmd = null;
+      return json(res, 200, { ...status(), menubarCmd: cmd });
+    }
+    return json(res, 200, status());
+  }
+  if (a === 'menubar' && m === 'POST') return json(res, 200, { ok: true, ...(await menubarAction((await body(req)).action || 'show')) });
   if (a === 'devices' && m === 'GET') return json(res, 200, { ...(await S.devices({ fresh: url.searchParams.get('fresh') === '1' })), rev: S.displaysRev });
   if (a === 'displays-changed' && m === 'POST') {
     // 메뉴바 앱이 macOS 화면 구성 변경 알림을 받으면 부른다 → 목록을 새로 읽어 displaysRev 를 올린다
@@ -155,16 +199,26 @@ async function api(req, res, url) {
     if (b && !c && m === 'GET') {
       const s = S.describe(S.readSession(b));
       let summary = null;
-      try { summary = fs.readFileSync(path.join(dir, 'summary.md'), 'utf8'); } catch {}
+      try { summary = fs.readFileSync(path.join(dir, S.resolveFile(dir, s, 'summary.md')), 'utf8'); } catch {}
       const tj = (() => { try { return JSON.parse(fs.readFileSync(path.join(dir, 'transcript.json'), 'utf8')); } catch { return null; } })();
       return json(res, 200, { session: s, transcript: tj, summary, claudeCodePrompt: claudeCodePrompt(s, dir) });
     }
     if (b && !c && m === 'PATCH') {
       const p = await body(req);
-      const next = S.updateSession(b, (cur) => ({ ...cur, ...(typeof p.title === 'string' ? { title: p.title.trim().slice(0, 120) } : {}), ...(typeof p.note === 'string' ? { note: p.note } : {}) }));
-      // 제목이 바뀌면 폴더 이름도 규칙대로(녹화·처리 중이면 끝난 뒤)
+      // 대시보드에서 제목을 고치면 Finder 에서 직접 정한 폴더 이름(nameLocked)도 풀고 규칙 이름으로 맞춘다
+      const prev = S.readSession(b);
+      let next;
+      try {
+        next = S.updateSession(b, (cur) => ({ ...cur, ...(typeof p.title === 'string' ? { title: p.title.trim().slice(0, 120), nameLocked: undefined } : {}), ...(typeof p.note === 'string' ? { note: p.note } : {}) }));
+      } catch (e) { return json(res, 409, { error: `이름을 바꾸지 못했습니다(녹화 폴더에 쓸 수 없음): ${e.code || e.message}` }); }
+      // 제목이 바뀌면 폴더(·파일) 이름도 규칙대로(녹화·처리 중이면 끝난 뒤).
+      // 실패하면 폴더·파일 이름은 applyNaming 이 되돌리고, 여기서 제목도 원래대로 돌린 뒤 error 를 돌려준다
       let naming = null;
-      if (typeof p.title === 'string') { try { naming = S.applyNaming(b); } catch (e) { naming = { error: e.message }; } }
+      if (typeof p.title === 'string') {
+        try { naming = S.applyNaming(b); }
+        catch (e) { naming = { error: e.message }; try { S.updateSession(b, { title: prev.title, nameLocked: prev.nameLocked }); } catch {} }
+      }
+      try { next = S.describe(S.readSession(b)); } catch {}
       return json(res, 200, { ok: true, session: next, naming });
     }
     if (b && !c && m === 'DELETE') return json(res, 200, { ok: true, ...(await S.deleteSession(b)) });
@@ -182,6 +236,7 @@ async function api(req, res, url) {
     if (c === 'transcript' && m === 'PUT') {
       // 사용자가 대시보드에서 고친 전사 저장 + 고친 부분에서 «A→B» 를 뽑아 교정 제안으로
       const p = await body(req);
+      S.toCanonical(b);   // 고정 이름(transcript.md …)으로 되돌린 뒤 쓰고, 다 쓰면 다시 폴더 이름에 맞춘다
       const segs = readSegments(dir);
       const pairs = [];
       for (const e of p.edits || []) {
@@ -191,12 +246,16 @@ async function api(req, res, url) {
         segs[i] = { ...segs[i], text: e.text.trim() };
       }
       writeTranscript(dir, S.readSession(b), segs, { editedAt: new Date().toISOString() });
+      try { S.applyNaming(b); } catch {}
       const added = pairs.length ? G.addProposals(pairs, 'edit', b) : 0;
       return json(res, 200, { ok: true, proposals: added, pairs });
     }
     if (c === 'summary' && m === 'PUT') {
-      fs.writeFileSync(path.join(dir, 'summary.md'), String((await body(req)).text || ''));
+      const text = String((await body(req)).text || '');
+      S.toCanonical(b);
+      fs.writeFileSync(path.join(dir, 'summary.md'), text);
       S.updateSession(b, (cur) => ({ ...cur, summary: { ...(cur.summary || {}), status: 'done', provider: cur.summary?.provider || 'manual', updatedAt: new Date().toISOString() } }));
+      try { S.applyNaming(b); } catch {}
       return json(res, 200, { ok: true });
     }
   }

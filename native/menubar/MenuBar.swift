@@ -1,6 +1,7 @@
 // MacRecorder 메뉴바 앱 — 화면 오른쪽 위 아이콘.
 // 녹화 자체는 서버(127.0.0.1:<port>)가 한다. 이 앱은 서버 API 를 부르는 리모컨이다.
-// 단축키 ⌃⌥⌘R: 어느 앱에 있든 녹화 시작/정지.
+// 단축키 ⌃⌥⌘R: 어느 앱에 있든 녹화 시작/정지. ⌃⌥⌘P: 일시정지.
+// 아이콘만 숨길 수 있다(단축키는 계속 동작). 다시 보이기: 대시보드 버튼·`macrec menubar`·Raycast·앱을 다시 열기.
 import AppKit
 import Carbon.HIToolbox
 import SwiftUI
@@ -8,8 +9,13 @@ import SwiftUI
 // MARK: - 서버 통신
 
 struct Api {
+  /// 설정 폴더. 시험 설치는 서버가 `open --env MACREC_HOME=…` 으로 띄워 실제 설치와 섞이지 않게 한다
+  static var home: URL {
+    if let h = ProcessInfo.processInfo.environment["MACREC_HOME"], !h.isEmpty { return URL(fileURLWithPath: h) }
+    return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".mac-recorder")
+  }
   static var port: Int {
-    let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".mac-recorder/config.json")
+    let url = home.appendingPathComponent("config.json")
     if let d = try? Data(contentsOf: url), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
        let p = j["port"] as? Int { return p }
     return 7931
@@ -63,10 +69,32 @@ final class Model: ObservableObject {
   @Published var notice: String? = nil   // 녹화 중 화면 변화(모니터 분리 등) 마지막 기록
   @Published var live: [Live] = []
   @Published var windows: [Win] = []
+  /// 메뉴바 아이콘을 보일지. 숨겨도 앱은 떠 있어 단축키가 동작한다. 다음 실행에도 이어진다.
+  /// 설정 폴더(~/.mac-recorder/menubar.json)에 둔다 — 시험 설치(MACREC_HOME)와 실제 설치가 섞이지 않게
+  @Published var iconShown: Bool = !Model.loadIconHidden() {
+    didSet { if oldValue != iconShown { Model.saveIconHidden(!iconShown) } }
+  }
+  static var menubarFile: URL { Api.home.appendingPathComponent("menubar.json") }
+  static func loadIconHidden() -> Bool {
+    guard let d = try? Data(contentsOf: menubarFile), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return false }
+    return j["iconHidden"] as? Bool ?? false
+  }
+  static func saveIconHidden(_ hidden: Bool) {
+    if let d = try? JSONSerialization.data(withJSONObject: ["iconHidden": hidden]) { try? d.write(to: menubarFile, options: .atomic) }
+  }
   private var windowsAt = Date.distantPast
   private var tick = 0
 
   init() {
+    // 서버가 «다시 띄우기»로 새로 켤 때는 --show 를 붙인다 → 숨긴 채 꺼졌어도 보이게
+    if CommandLine.arguments.contains("--show") { iconShown = true }
+    // 단축키는 아이콘이 숨어 있어도 동작해야 하므로 화면(메뉴)이 아니라 여기서 연결한다
+    HotKey.onPress = { [weak self] in self?.toggle() }
+    HotKey.onPause = { [weak self] in self?.togglePause() }
+    // 앱을 다시 열면(Finder·Spotlight·open) 아이콘을 다시 보인다
+    NotificationCenter.default.addObserver(forName: .macrecShowIcon, object: nil, queue: .main) { [weak self] _ in
+      Task { @MainActor in self?.iconShown = true }
+    }
     Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
       Task { @MainActor in self?.poll() }
     }
@@ -86,8 +114,14 @@ final class Model: ObservableObject {
     tick += 1
     Task {
       do {
-        let s = try await Api.call("status", timeout: 3)
+        // menubar=1: 서버가 메뉴바 앱이 살아 있는지·아이콘을 숨겼는지 안다(대시보드 «다시 띄우기» 안내에 쓴다)
+        let s = try await Api.call("status?menubar=1&icon=\(iconShown ? 1 : 0)", timeout: 3)
         online = true
+        switch s["menubarCmd"] as? String {
+        case "show": iconShown = true
+        case "hide": iconShown = false
+        default: break
+        }
         if let a = s["active"] as? [String: Any] {
           recording = true
           elapsed = a["elapsedSec"] as? Int ?? 0
@@ -255,6 +289,32 @@ final class Model: ObservableObject {
     DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.poll() }
   }
 
+  /// 아이콘만 숨긴다(단축키는 계속). 다시 보이는 방법을 먼저 알려 준다
+  func hideIcon() {
+    let a = NSAlert()
+    a.messageText = "메뉴바 아이콘을 숨길까요?"
+    a.informativeText = "단축키 ⌃⌥⌘R(녹화)·⌃⌥⌘P(일시정지)는 계속 동작합니다.\n\n다시 보이려면\n· 대시보드(\(Api.base)) 설정 → «메뉴바 아이콘 다시 띄우기»\n· 터미널에서 macrec menubar\n· Raycast «메뉴바 아이콘 다시 띄우기»\n· Finder 에서 MacRecorder 앱을 다시 열기"
+    a.addButton(withTitle: "숨기기")
+    a.addButton(withTitle: "취소")
+    NSApp.activate(ignoringOtherApps: true)
+    if a.runModal() == .alertFirstButtonReturn { iconShown = false }
+  }
+  /// 앱을 끈다(아이콘·단축키 모두 꺼짐). 진행 중인 녹화는 서버가 하므로 멈추지 않는다
+  func quitApp() {
+    let a = NSAlert()
+    a.messageText = "MacRecorder 메뉴바 앱을 종료할까요?"
+    a.informativeText = "아이콘과 단축키 ⌃⌥⌘R·⌃⌥⌘P 가 함께 꺼집니다. 진행 중인 녹화는 멈추지 않습니다.\n\n다시 켜려면\n· 대시보드(\(Api.base)) → «메뉴바 아이콘 다시 띄우기»\n· 터미널에서 macrec menubar\n· Raycast «메뉴바 아이콘 다시 띄우기»\n· 다음 로그인 때 저절로 켜집니다\n\n아이콘만 치우고 단축키는 쓰려면 «아이콘만 숨기기»를 고르세요."
+    a.addButton(withTitle: "종료")
+    a.addButton(withTitle: "아이콘만 숨기기")
+    a.addButton(withTitle: "취소")
+    NSApp.activate(ignoringOtherApps: true)
+    switch a.runModal() {
+    case .alertFirstButtonReturn: NSApp.terminate(nil)
+    case .alertSecondButtonReturn: iconShown = false
+    default: break
+    }
+  }
+
   func alert(_ title: String, _ msg: String) {
     let a = NSAlert()
     a.messageText = title
@@ -381,13 +441,25 @@ struct MenuContent: View {
     if m.proposals > 0 { Button("교정 제안 \(m.proposals)개 확인") { m.open("#dict") } }
     Divider()
     Button("설정·권한") { m.open("#settings") }
-    Button("MacRecorder 메뉴 닫기") { NSApp.terminate(nil) }
+    Button("아이콘 숨기기 (단축키는 계속 동작)") { m.hideIcon() }
+    Button("MacRecorder 종료 (아이콘·단축키 꺼짐)") { m.quitApp() }
   }
 }
 
 
+extension Notification.Name { static let macrecShowIcon = Notification.Name("macrecShowIcon") }
+
+/// 이미 떠 있는 앱을 다시 열면(Finder·Spotlight·`open`) 숨긴 아이콘을 다시 보인다
+final class AppDelegate: NSObject, NSApplicationDelegate {
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    NotificationCenter.default.post(name: .macrecShowIcon, object: nil)
+    return false
+  }
+}
+
 @main
 struct MacRecorderApp: App {
+  @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
   @StateObject private var model = Model()
   private let hotkey: HotKey
 
@@ -396,9 +468,10 @@ struct MacRecorderApp: App {
   }
 
   var body: some Scene {
-    MenuBarExtra {
+    // $model.iconShown 을 바로 넘기면 SwiftUI 가 화면을 그릴 때마다 같은 값을 다시 써서(@Published 는 같은 값도 알린다)
+    // 다시 그리기가 끝없이 돈다(CPU 100%). 값이 바뀔 때만 쓴다.
+    MenuBarExtra(isInserted: Binding(get: { model.iconShown }, set: { v in if model.iconShown != v { model.iconShown = v } })) {
       MenuContent().environmentObject(model)
-        .onAppear { HotKey.onPress = { [weak model] in model?.toggle() }; HotKey.onPause = { [weak model] in model?.togglePause() } }
     } label: {
       HStack(spacing: 3) {
         Image(nsImage: IconArt.menuBar(recording: model.recording || !model.live.isEmpty, paused: model.recording ? model.paused : model.live.allSatisfy(\.paused),
@@ -406,7 +479,6 @@ struct MacRecorderApp: App {
         if model.recording { Text(model.elapsedText).monospacedDigit() }
         else if !model.live.isEmpty { Text("창·탭 \(model.live.count)").monospacedDigit() }
       }
-      .task { HotKey.onPress = { [weak model] in model?.toggle() }; HotKey.onPause = { [weak model] in model?.togglePause() } }
     }
     .menuBarExtraStyle(.menu)
   }

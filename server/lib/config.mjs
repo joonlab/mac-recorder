@@ -46,7 +46,8 @@ export const DEFAULTS = {
     llmCorrection: true, // 요약 제공자가 있으면 요약 전에 사전·맥락으로 전사 교정
   },
   // 녹화 폴더 이름 규칙. 토큰 {date} {time} {hms} {title} {kind} {sources} {app} {id}. 내려받기 파일 이름도 이 이름을 쓴다
-  naming: { pattern: '{date}_{time}_{title}' },
+  // files: 폴더 안 녹화·전사·요약 파일 이름도 폴더 이름과 같게. listLabel: 목록에 보일 이름 title(제목, 없으면 날짜) | folder(Finder 폴더 이름) | both
+  naming: { pattern: '{date}_{time}_{title}', files: false, listLabel: 'title' },
   context: '', // 내 맥락: 소속·자주 나오는 사람/제품 이름 등. 교정·요약 프롬프트에 들어간다
 };
 

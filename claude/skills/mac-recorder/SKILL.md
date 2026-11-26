@@ -25,6 +25,7 @@ macrec show 20261112   # ID 앞부분으로 찾기 (ID 는 시작 시각. 폴더
 - `transcript.json` — 같은 내용을 JSON 으로 나눠 담은 파일(segments: start, end, speaker, text)
 - `summary.md` — 요약(있으면)
 - `recording.mp4` / `recording.m4a` — 원본, `*_mixed.*` — 재생용
+- 설정 «폴더 안 파일 이름도 폴더 이름과 같게»가 켜져 있으면 `transcript.md` → `<폴더 이름>_전사.md`, `summary.md` → `<폴더 이름>_요약.md`, 녹화 → `<폴더 이름>.mp4` 처럼 이름이 바뀌어 있다. 정확한 경로는 `macrec show <ID>` 결과를 쓴다. `transcript.json`·`session.json` 은 늘 그대로다.
 
 전사가 없으면 `macrec transcribe <ID>` 로 만들고 `macrec show <ID>` 로 끝났는지 확인한다(백그라운드 작업, 1시간 녹화에 수 분).
 
@@ -34,7 +35,7 @@ macrec show 20261112   # ID 앞부분으로 찾기 (ID 는 시작 시각. 폴더
 2. `__HOME__/glossary.json` 의 고유명사·교정 규칙과 `config.json` 의 `context`(사용자 맥락)를 참고한다.
 3. 요약 형식은 `__HOME__/prompts/summary.md` 가 있으면 그것을, 없으면 `__REPO__/templates/summary.md` 를 따른다.
    - 첫 줄은 `# 제목`. 전사에 없는 내용은 쓰지 않는다. 중요한 발언에는 `[MM:SS]` 를 붙인다.
-4. 사용자가 저장을 원하면 녹화 폴더의 `summary.md` 에 쓴다. 대시보드에 바로 보인다.
+4. 사용자가 저장을 원하면 녹화 폴더의 `summary.md` 에 쓴다(파일 이름이 `…_요약.md` 로 바뀌어 있어도 `summary.md` 로 쓰면 된다 — 대시보드가 알아보고 예전 요약 자리에 넣는다). 대시보드에 바로 보인다.
 5. 사용자가 다른 형식(할 일만, 고객 요청만, 메일 초안 등)을 원하면 그 형식을 따른다.
 
 ## 교정 (다음 녹화부터 자동으로 고쳐지게)

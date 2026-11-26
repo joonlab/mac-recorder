@@ -288,7 +288,11 @@ EOF
     ok "메뉴바 앱 자동 실행 등록"
   fi
 fi
-[ $MENUBAR = 1 ] && { open -g "$APPS/MacRecorder.app"; ok "메뉴바 아이콘 실행(화면 오른쪽 위 ◉)"; }
+# 시험 설치는 메뉴바 앱이 시험용 설정 폴더(MACREC_HOME)를 보게 한다(실제 설치의 서버와 섞이지 않게)
+if [ $MENUBAR = 1 ]; then
+  if [ $TEST_MODE = 1 ]; then open -g --env "MACREC_HOME=$HOME_DIR" "$APPS/MacRecorder.app"; else open -g "$APPS/MacRecorder.app"; fi
+  ok "메뉴바 아이콘 실행(화면 오른쪽 위 ◉)"
+fi
 
 # 다음 업데이트(macrec update · Claude Code)가 설치 위치와 옵션을 알 수 있게 기록
 "$NODE" -e '

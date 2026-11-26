@@ -28,8 +28,10 @@ tail -50 ~/.mac-recorder/logs/server.log
 ## 메뉴바 아이콘이 안 보인다
 
 ```bash
-open ~/Applications/MacRecorder.app
+macrec menubar
 ```
+
+메뉴의 «MacRecorder 종료»를 눌렀거나 «아이콘 숨기기»를 했다면 이 명령, 대시보드 위의 «메뉴바 아이콘 다시 띄우기» 버튼, Raycast «메뉴바 아이콘 다시 띄우기» 중 하나로 다시 띄웁니다. 종료했을 때는 단축키 ⌃⌥⌘R·⌃⌥⌘P 도 꺼져 있고, 아이콘만 숨겼을 때는 단축키가 계속 동작합니다. 서버가 꺼져 있으면 `macrec menubar` 가 앱을 직접 엽니다(`open ~/Applications/MacRecorder.app` 과 같음).
 
 메뉴바에 아이콘이 많으면 노치에 가려 안 보일 수 있습니다. 다른 메뉴바 아이콘을 ⌘ 를 누른 채 끌어 정리하거나 Bartender·Ice 같은 메뉴바 정리 앱을 쓰세요.
 
@@ -81,7 +83,7 @@ https://github.com/joonlab/mac-recorder 최신 버전으로 업데이트해 줘.
 
 ## 모니터를 꽂았는데 대시보드 화면 목록에 안 나온다
 
-메뉴바 앱이 켜져 있으면 1~2초 안에 바뀝니다. 메뉴바 앱을 끈 경우 대시보드가 10초마다 다시 확인합니다. 그래도 안 바뀌면 메뉴바 앱이 실행 중인지 확인하세요(`open ~/Applications/MacRecorder.app`).
+메뉴바 앱이 켜져 있으면 1~2초 안에 바뀝니다. 메뉴바 앱을 끈 경우 대시보드가 10초마다 다시 확인합니다. 그래도 안 바뀌면 메뉴바 앱이 실행 중인지 확인하세요(`macrec menubar`).
 
 ## 창 녹화에 소리가 안 들어간다 / 다른 소리가 섞인다
 

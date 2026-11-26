@@ -83,6 +83,10 @@ const HELP = `macrec — MacRecorder
   macrec glossary rule "잘못" "맞게"    교정 규칙 바로 추가
   macrec glossary propose "잘못" "맞게" 교정 제안으로 올리기(대시보드에서 승인)
 
+메뉴바 아이콘
+  macrec menubar                        메뉴바 아이콘 다시 띄우기(종료했거나 숨겼을 때)
+  macrec menubar --hide                 아이콘만 숨기기(단축키 ⌃⌥⌘R·⌃⌥⌘P 는 계속 동작)
+
 점검
   macrec doctor                         설치·권한·서버 상태 점검
   macrec update                         GitHub 에서 최신 버전 받아 다시 설치(지난번 옵션 그대로)
@@ -168,13 +172,14 @@ async function main() {
         `${s.title || '(제목 없음)'} — ${s.id}`,
         `길이 ${hms(s.durationSec)} · 상태 ${s.status}${s.job?.status ? ` · 작업 ${s.job.action}:${s.job.status}${s.job.error ? ` (${s.job.error})` : ''}` : ''}`,
         `폴더   ${s.dir}`,
-        `녹화   ${s.media ? f(s.media) : '-'}`,
-        `재생   ${s.play ? f(s.play) : '-'}`,
-        `전사   ${s.hasTranscript ? f('transcript.md') : '없음'}`,
-        `요약   ${s.hasSummary ? f('summary.md') : '없음'}`,
+        `녹화   ${s.media ? f(s.fileNames?.[s.media] || s.media) : '-'}`,
+        `재생   ${s.play ? f(s.fileNames?.[s.play] || s.play) : '-'}`,
+        `전사   ${s.hasTranscript ? f(s.fileNames?.['transcript.md'] || 'transcript.md') : '없음'}`,
+        `요약   ${s.hasSummary ? f(s.fileNames?.['summary.md'] || 'summary.md') : '없음'}`,
       ].join('\n'));
     }
     case 'folder': { await api('open', { body: { what: 'recordings' } }); return; }
+    case 'menubar': return menubar();
     case 'path': { const s = await resolveId(pos[0]); return console.log(s.dir); }
     case 'open': {
       const s = pos[0] ? await resolveId(pos[0]) : null;
@@ -234,6 +239,21 @@ async function main() {
   }
 }
 
+/** 메뉴바 아이콘 다시 띄우기(--hide: 아이콘만 숨기기, 단축키는 계속). 서버가 꺼져 있으면 앱을 직접 연다 */
+async function menubar() {
+  const action = flags.has('--hide') ? 'hide' : 'show';
+  try {
+    const r = await api('menubar', { body: { action } });
+    return out(r, action === 'hide' ? '메뉴바 아이콘을 숨겼습니다. 단축키 ⌃⌥⌘R·⌃⌥⌘P 는 계속 동작합니다. 다시 보이기: macrec menubar'
+      : r.how === 'launched' ? '메뉴바 앱을 켰습니다(화면 오른쪽 위 ◉). 단축키 ⌃⌥⌘R·⌃⌥⌘P 도 다시 동작합니다.' : '메뉴바 아이콘을 다시 보이게 했습니다.');
+  } catch (e) {
+    if (action === 'hide' || !/연결할 수 없습니다/.test(e.message)) throw e;
+    const app = path.join(path.dirname(String(cfg.captureApp || path.join(os.homedir(), 'Applications', 'x')).replace(/^~(?=\/|$)/, os.homedir())), 'MacRecorder.app');
+    execFileSync('open', ['-g', app, '--args', '--show']);
+    return console.log(`서버에 연결할 수 없어 메뉴바 앱을 직접 켰습니다: ${app}`);
+  }
+}
+
 /** 설치 위치: install.json → 이 스크립트의 실제 위치(~/.local/bin/macrec 은 저장소 bin/macrec 으로 연결돼 있다) */
 function repoDir() {
   try { const r = JSON.parse(fs.readFileSync(path.join(HOME, 'install.json'), 'utf8')).repo; if (r && fs.existsSync(r)) return r; } catch {}
@@ -269,7 +289,7 @@ async function doctor() {
   line(fs.existsSync(path.join(apps, 'MacRecorder.app')), '메뉴바 앱', path.join(apps, 'MacRecorder.app'));
   let running = false;
   try { running = execFileSync('pgrep', ['-x', 'MacRecorder']).length > 0; } catch {}
-  line(running, '메뉴바 앱 실행 중', running ? '' : `open ~/Applications/MacRecorder.app`);
+  line(running, '메뉴바 앱 실행 중', running ? '' : '아이콘·단축키 꺼짐 — macrec menubar 로 다시 띄우기');
   let s = null;
   try { s = await api('status'); } catch (e) { line(false, '서버', e.message); }
   if (s) {
@@ -277,6 +297,7 @@ async function doctor() {
     line(s.whisper.ready ? true : null, '로컬 전사(whisper)', s.whisper.ready ? path.basename(s.whisper.model) : '미설치 — ./install.sh --with-transcribe');
     line(s.ai.provider === 'none' ? null : s.ai.runnable || s.ai.provider === 'claude-code', 'AI 요약', `${s.ai.provider}${s.ai.reason ? ` (${s.ai.reason})` : ''}`);
     line(true, '녹화 폴더', s.recordingsDir);
+    if (s.menubar?.running && s.menubar.iconHidden) line(null, '메뉴바 아이콘 숨김', '단축키는 동작 · 다시 보이기: macrec menubar');
     try {
       const p = await api('permissions');
       line(p.screen, '권한: 화면 및 시스템 오디오 녹음');

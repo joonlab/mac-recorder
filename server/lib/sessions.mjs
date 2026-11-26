@@ -71,50 +71,180 @@ export function ruleName(s, pattern) {
 }
 export function folderNameFor(s) { return ruleName(s, loadConfig().naming?.pattern); }
 
-/** 폴더 이름을 규칙대로 맞춘다. 녹화 중·처리 중이면 미뤄 두고(renamePending) 처리가 끝난 뒤 다시 부른다. */
+// ── 폴더 안 파일 이름(설정 naming.files) ───────────────────────────
+// 녹화·전사·요약처럼 사람이 여는 파일만 폴더 이름을 따라 바꾼다(예: «20261125_1445_OO교육.mp4», «…_전사.md»).
+// 처리 코드(job.mjs·전사·요약)는 늘 고정 이름(recording.mp4·transcript.md …)으로 읽고 쓴다.
+// 그래서 처리를 시작하기 전에 고정 이름으로 되돌리고(toCanonical), 끝난 뒤 다시 바꾼다(applyNaming).
+// 바꾼 이름은 session.json 의 files({고정 이름: 지금 이름})에 적어 두고, 서버는 resolveFile 로 찾는다.
+// session.json·transcript.json·capture.json·로그 같은 내부 파일은 바꾸지 않는다.
+const PUBLIC_RE = /^(recording(_all|_mixed)?\.(mp4|m4a)|display-\d+\.mp4|transcript\.(md|txt|srt)|summary\.md)$/;
+export const isPublicFile = (n) => PUBLIC_RE.test(n);
+
+/** 고정 이름 → 지금 실제 파일 이름. 고정 이름 파일이 있으면 그쪽이 새것이다(처리 중이거나 막 새로 쓴 것). */
+export function resolveFile(dir, s, canonical) {
+  if (fs.existsSync(path.join(dir, canonical))) return canonical;
+  const m = s?.files?.[canonical];
+  if (m && fs.existsSync(path.join(dir, m))) return m;
+  return canonical;
+}
+/** 지금 폴더에 있는 사람이 여는 파일들(고정 이름 기준) */
+function presentPublic(dir, s) {
+  const out = new Set();
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch {}
+  for (const n of names) if (PUBLIC_RE.test(n)) out.add(n);
+  for (const [c, m] of Object.entries(s?.files || {})) if (PUBLIC_RE.test(c) && fs.existsSync(path.join(dir, m))) out.add(c);
+  return out;
+}
+/** 고정 이름별로 «폴더 이름 + 종류» 이름을 정한다. 재생 파일이 «폴더이름.mp4» 를 갖고, 나머지는 뒤에 종류를 붙인다. */
+export function publicNames(base, present, media) {
+  const ext = media ? path.extname(media) : '.mp4';
+  const play = ['recording_all.mp4', `recording_mixed${ext}`, media].find((f) => f && present.has(f));
+  const map = {};
+  for (const c of present) {
+    const e = path.extname(c), stem = path.basename(c, e);
+    let suffix;
+    if (c === play) suffix = '';
+    else if (stem === 'recording') suffix = '_원본';
+    else if (stem === 'recording_mixed') suffix = '_주화면';
+    else if (stem === 'recording_all') suffix = '_합본';
+    else if (stem.startsWith('display-')) suffix = `_화면${stem.slice(8)}`;
+    else if (stem === 'transcript') suffix = '_전사';
+    else if (stem === 'summary') suffix = '_요약';
+    else suffix = `_${stem}`;
+    map[c] = `${base}${suffix}${e}`;
+  }
+  return map;
+}
+/** 이름을 바꾼 파일을 모두 고정 이름으로 되돌린다(처리 작업을 띄우기 전, 사용자가 전사·요약을 고치기 전) */
+export function toCanonical(id) {
+  const dir = sessionDir(id);
+  const s = readJSON(path.join(dir, 'session.json'), null);
+  if (!s?.files || !Object.keys(s.files).length) return { restored: 0 };
+  let restored = 0;
+  const left = {};
+  for (const [c, m] of Object.entries(s.files)) {
+    const from = path.join(dir, m), to = path.join(dir, c);
+    if (!fs.existsSync(from)) continue;
+    if (fs.existsSync(to)) { left[c] = m; continue; }   // 고정 이름 쪽이 이미 새로 생겼다 → 예전 것은 다음 applyNaming 때 덮어쓴다
+    try { fs.renameSync(from, to); restored++; } catch { left[c] = m; }
+  }
+  updateSession(id, { files: Object.keys(left).length ? left : undefined });
+  return { restored };
+}
+/** 파일 이름을 base 에 맞춘다. 하나라도 실패하면 이번에 바꾼 것을 모두 되돌리고 오류를 던진다. */
+function renameFiles(dir, s, base) {
+  const present = presentPublic(dir, s);
+  const want = publicNames(base, present, s.media);
+  const done = [];
+  const files = {};
+  try {
+    for (const [c, target] of Object.entries(want)) {
+      const cur = resolveFile(dir, s, c);
+      if (cur !== target) {
+        const tp = path.join(dir, target);
+        // 그 이름의 파일이 이미 있으면: 같은 종류의 예전 사본(고정 이름 쪽이 새로 생김)만 덮어쓴다.
+        // 남의 파일(사용자가 넣은 파일 등)이면 건드리지 않고 이 파일은 지금 이름 그대로 둔다.
+        if (fs.existsSync(tp) && s.files?.[c] !== target) { if (cur !== c) files[c] = cur; continue; }
+        fs.renameSync(path.join(dir, cur), tp);
+        done.push([tp, path.join(dir, cur)]);
+      }
+      if (target !== c) files[c] = target;
+    }
+  } catch (e) {
+    for (const [to, from] of done.reverse()) { try { fs.renameSync(to, from); } catch {} }
+    throw e;
+  }
+  return files;
+}
+
+/** 녹화·처리 중이면 true(이름 바꾸기·되돌리기를 미룬다) */
+function isBusy(s, { self = false } = {}) {
+  return s.status === 'recording' || s.status === 'finishing' || isLive(s.id) || readJSON(P.active, null)?.id === s.id
+    || (!self && s.job && ['running', 'queued'].includes(s.job.status) && alive(s.job.pid));
+}
+
+/** Finder 에서 바꾼 폴더 이름에서 제목을 뽑는다(앞의 날짜·시간을 뗀다) */
+export function titleFromFolder(name) {
+  return String(name).replace(/^\d{8}(?:[_\- ]?\d{4}(?:\d\d)?)?(?:[_\- ]+|$)/, '').trim().slice(0, 120);
+}
+
+/**
+ * 폴더 이름(과 설정에 따라 폴더 안 파일 이름)을 규칙대로 맞춘다.
+ * 녹화 중·처리 중이면 미뤄 두고(renamePending) 처리가 끝난 뒤 다시 부른다.
+ * Finder 에서 직접 바꾼 폴더(nameLocked)는 규칙 이름으로 되돌리지 않고 그 이름을 쓴다.
+ * 실패하면 원래 이름으로 되돌리고 오류를 던진다.
+ */
 export function applyNaming(id, { self = false } = {}) {
   const dir = sessionDir(id);
   const s = readJSON(path.join(dir, 'session.json'), null);
   if (!s) return { renamed: false };
-  const busy = s.status === 'recording' || s.status === 'finishing' || isLive(id)
-    || (!self && s.job && ['running', 'queued'].includes(s.job.status) && alive(s.job.pid));
-  if (busy) { if (!s.renamePending) updateSession(id, { renamePending: true }); return { renamed: false, pending: true }; }
+  if (isBusy(s, { self })) { if (!s.renamePending) updateSession(id, { renamePending: true }); return { renamed: false, pending: true }; }
   const root = path.dirname(dir);
-  const want = folderNameFor(s);
-  if (path.basename(dir) === want || path.basename(dir).replace(/_\d+$/, '') === want) {
-    if (s.renamePending) updateSession(id, { renamePending: false });
-    return { renamed: false, name: path.basename(dir) };
+  const cur = path.basename(dir);
+  const want = s.nameLocked ? cur : folderNameFor(s);
+  let name = cur;
+  if (cur !== want && cur.replace(/_\d+$/, '') !== want) {
+    name = want; let k = 2;
+    while (fs.existsSync(path.join(root, name))) name = `${want}_${k++}`;
   }
-  let name = want, k = 2;
-  while (fs.existsSync(path.join(root, name))) name = `${want}_${k++}`;
-  fs.renameSync(dir, path.join(root, name));
-  dirCache.map.set(id, name);
-  updateSession(id, { renamePending: false });
-  return { renamed: true, name };
+  const newDir = path.join(root, name);
+  if (name !== cur) { fs.renameSync(dir, newDir); dirCache.map.set(id, name); }
+  try {
+    const filesOn = !!loadConfig().naming?.files;
+    let files;
+    if (filesOn) files = renameFiles(newDir, s, name);
+    else if (s.files && Object.keys(s.files).length) { toCanonical(id); files = readJSON(path.join(newDir, 'session.json'), {}).files; }
+    updateSession(id, (c) => ({ ...c, renamePending: false, folderName: name, files: files && Object.keys(files).length ? files : undefined, namingError: undefined }));
+  } catch (e) {
+    // 파일 이름을 못 바꿨다 → 폴더 이름도 원래대로
+    if (name !== cur) { try { fs.renameSync(newDir, dir); dirCache.map.set(id, cur); } catch {} }
+    try { updateSession(id, { namingError: e.message }); } catch {}
+    const why = { EPERM: '파일이 잠겨 있거나 바꿀 권한이 없습니다', EACCES: '녹화 폴더에 쓸 권한이 없습니다', EBUSY: '다른 앱이 파일을 쓰고 있습니다' }[e.code] || e.message;
+    const err = new Error(`이름을 바꾸지 못해 원래 이름으로 두었습니다(${why}).`);
+    err.status = 409;
+    throw err;
+  }
+  return { renamed: name !== cur, name };
 }
 export function applyNamingAll() {
-  let renamed = 0, pending = 0;
+  let renamed = 0, pending = 0, failed = 0;
   for (const s of listSessions()) {
-    try { const r = applyNaming(s.id); if (r.renamed) renamed++; if (r.pending) pending++; } catch {}
+    try { const r = applyNaming(s.id); if (r.renamed) renamed++; if (r.pending) pending++; } catch { failed++; }
   }
-  return { renamed, pending };
+  return { renamed, pending, failed };
+}
+
+/** 목록을 읽을 때: Finder 에서 바꾼 폴더 이름을 알아보고, 어긋난 파일 이름을 맞춘다(처리 중인 녹화는 건드리지 않는다) */
+function tidy(dir, s) {
+  if (isBusy(s)) return s;
+  const name = path.basename(dir);
+  if (!s.folderName) return updateSession(s.id, { folderName: name }) || s;   // 0.4.x 이전 녹화: 지금 이름을 기준으로 삼는다
+  let changed = false;
+  if (name !== s.folderName) {
+    // Finder 에서 폴더 이름을 바꿨다 → 제목을 따라 바꾸고 이 이름을 지킨다
+    s = updateSession(s.id, { title: titleFromFolder(name), nameLocked: true, folderName: name }) || s;
+    changed = true;
+  }
+  const filesOn = !!loadConfig().naming?.files;
+  if (!changed && filesOn) {
+    // 고정 이름 파일이 생겼거나(다시 전사·요약 저장) 파일 이름이 폴더 이름과 어긋났다
+    const want = publicNames(name, presentPublic(dir, s), s.media);
+    changed = Object.entries(want).some(([c, t]) => resolveFile(dir, s, c) !== t);
+  }
+  if (!changed && !filesOn && s.files && Object.keys(s.files).length) changed = true;
+  if (changed) { try { applyNaming(s.id); } catch {} return readJSON(path.join(sessionDir(s.id), 'session.json'), s); }
+  return s;
 }
 
 /** 내려받기 파일 이름: 폴더 이름 + 파일 종류(예: «20261118_1402_OO교육.mp4», «…_전사.md») */
 export function downloadName(id, file) {
   const dir = sessionDir(id);
+  const s = readJSON(path.join(dir, 'session.json'), {});
   const base = path.basename(dir);
-  const ext = path.extname(file);
-  const stem = path.basename(file, ext);
-  const has = (f) => fs.existsSync(path.join(dir, f));
-  let suffix;
-  if (stem === 'recording_all' || stem === 'recording_mixed') suffix = '';
-  else if (stem === 'recording') suffix = has('recording_all.mp4') || has(`recording_mixed${ext}`) ? '_원본' : '';
-  else if (stem === 'transcript') suffix = '_전사';
-  else if (stem === 'summary') suffix = '_요약';
-  else if (stem.startsWith('display-')) suffix = `_화면${stem.slice(7)}`;
-  else suffix = `_${stem}`;
-  return `${base}${suffix}${ext}`;
+  const canonical = Object.entries(s.files || {}).find(([, m]) => m === file)?.[0] || file;
+  const present = presentPublic(dir, s); present.add(canonical);
+  return publicNames(base, present, s.media)[canonical] || `${base}_${file}`;
 }
 export function readSession(id) {
   const s = readJSON(path.join(sessionDir(id), 'session.json'), null);
@@ -133,7 +263,7 @@ export function updateSession(id, patch) {
 // 폴더 안 파일로 재생·전사 상태를 계산한다(session.json 이 늦게 갱신돼도 실제 파일 기준으로 보이게)
 export function describe(s) {
   const dir = sessionDir(s.id);
-  const has = (f) => fs.existsSync(path.join(dir, f));
+  const has = (f) => fs.existsSync(path.join(dir, resolveFile(dir, s, f)));
   const media = s.media && has(s.media) ? s.media : null;
   const base = media ? media.replace(/\.[^.]+$/, '') : null;
   const ext = media ? path.extname(media) : '';
@@ -150,6 +280,8 @@ export function describe(s) {
     hasTranscript: has('transcript.md'),
     hasSummary: has('summary.md'),
     bytes: dirBytes(dir),
+    // 고정 이름 → 지금 실제 이름(대시보드·macrec 이 보여 줄 이름)
+    fileNames: Object.fromEntries([...presentPublic(dir, s)].map((c) => [c, resolveFile(dir, s, c)])),
   };
 }
 
@@ -158,8 +290,11 @@ export function listSessions() {
   scanDirs(root);
   const out = [];
   for (const id of [...dirCache.map.keys()].sort().reverse()) {
-    const s = readJSON(path.join(root, dirCache.map.get(id), 'session.json'), null);
-    if (s) out.push(describe(s));
+    const dir = path.join(root, dirCache.map.get(id));
+    let s = readJSON(path.join(dir, 'session.json'), null);
+    if (!s) continue;
+    try { s = tidy(dir, s); } catch {}
+    out.push(describe(s));
   }
   return out;
 }
@@ -265,7 +400,7 @@ export async function startRecording(opts = {}) {
   const session = {
     id, title: opts.title || '', createdAt: idTime(id), stoppedAt: null,
     sources: { video, mic, system }, display: video ? (r.display || 'all') : null, micId: mic ? (r.micId || '') : null,
-    media, extras: [], status: 'recording',
+    media, extras: [], status: 'recording', folderName: path.basename(dir),
     transcript: { status: 'none' }, summary: { status: 'none' },
   };
   writeJSON(path.join(dir, 'session.json'), session);
@@ -351,7 +486,8 @@ export async function reveal(id, file) {
 export function safeFile(id, name) {
   const dir = sessionDir(id);
   if (!name || name.includes('/') || name.includes('\\') || name.startsWith('.')) throw new Error('잘못된 파일 이름');
-  const f = path.join(dir, name);
+  let f = path.join(dir, name);
+  if (!fs.existsSync(f)) f = path.join(dir, resolveFile(dir, readJSON(path.join(dir, 'session.json'), {}), name));
   if (!fs.existsSync(f)) throw new Error('파일 없음');
   return f;
 }
@@ -363,6 +499,8 @@ export function spawnJob(id, action, extra = []) {
   if (action !== 'finalize' && s.job?.status === 'running' && alive(s.job.pid)) {
     throw new Error('이미 처리 중입니다. 끝난 뒤 다시 시도하세요.');
   }
+  // 처리 코드는 고정 이름으로 읽고 쓴다 → 이름을 바꿔 둔 파일을 먼저 되돌린다(끝나면 job.mjs 가 applyNaming 으로 다시 바꾼다)
+  try { toCanonical(id); } catch {}
   // 상태를 먼저 «대기»로 써 둔다. 띄운 뒤에 쓰면 작업 프로세스가 먼저 쓴 «진행 중»을 덮어쓴다.
   updateSession(id, (cur) => ({ ...cur, job: { action, status: 'queued', startedAt: new Date().toISOString() } }));
   const log = fs.openSync(path.join(sessionDir(id), 'job.log'), 'a');
@@ -457,7 +595,7 @@ export async function startWindowRecording(opts = {}) {
   const window = { id: wid, app: w.app, title: w.title, bundleId: w.bundleId, browser: !!w.browser, audio };
   const session = {
     id, kind: 'window', title, createdAt: idTime(id), stoppedAt: null, sources, window, micId: mic ? (micId || '') : null,
-    media, extras: [], status: 'recording', transcript: { status: 'none' }, summary: { status: 'none' },
+    media, extras: [], status: 'recording', folderName: path.basename(dir), transcript: { status: 'none' }, summary: { status: 'none' },
   };
   writeJSON(path.join(dir, 'session.json'), session);
   const cap = await launchAndWait(cfg, id, dir, args, media);
@@ -475,7 +613,7 @@ export function startTabRecording(opts = {}) {
   const dir = makeSessionDir(cfg, { id, title, sources, kind: 'tab', tab });
   const session = {
     id, kind: 'tab', title, createdAt: idTime(id), stoppedAt: null, sources, tab,
-    media: 'recording.mp4', extras: [], status: 'recording', transcript: { status: 'none' }, summary: { status: 'none' },
+    media: 'recording.mp4', extras: [], status: 'recording', folderName: path.basename(dir), transcript: { status: 'none' }, summary: { status: 'none' },
   };
   writeJSON(path.join(dir, 'session.json'), session);
   writeLive({ id, kind: 'tab', startedAt: session.createdAt, title, tab, sources, seq: -1, bytes: 0, lastSeen: Date.now(), paused: false, recordedSec: 0, cmd: null });

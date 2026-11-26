@@ -87,10 +87,39 @@ function renderBanners() {
     const miss = [!permCache.screen && '화면 기록', permCache.microphone !== 'authorized' && '마이크'].filter(Boolean).join('·');
     out.push(`<div class="banner err"><span>⚠️ <b>${miss}</b> 권한이 아직 없습니다. 녹화하려면 허용이 필요합니다.</span><button data-act="perm">권한 설정</button></div>`);
   }
+  const mb = s?.menubar;
+  if (mb && mb.expected && mb.installed && mb.running === false) {
+    out.push(`<div class="banner warn"><span>메뉴바 아이콘이 꺼져 있습니다. 단축키 ⌃⌥⌘R(녹화)·⌃⌥⌘P(일시정지)도 지금은 동작하지 않습니다.</span><button data-act="menubar">메뉴바 아이콘 다시 띄우기</button></div>`);
+  }
   if (s && !s.whisper.ready) out.push(`<div class="banner warn"><span>전사 기능이 설치되지 않았습니다. 녹화는 됩니다. 전사가 필요하면 터미널에서 <code>./install.sh --with-transcribe</code></span></div>`);
   $('#banners').innerHTML = out.join('');
   $$('#banners [data-act="perm"]').forEach((b) => b.addEventListener('click', () => showTab('settings')));
+  $$('#banners [data-act="menubar"]').forEach((b) => b.addEventListener('click', () => menubarAction('show', b)));
+  renderMenubarState();
 }
+// ── 메뉴바 아이콘 ───────────────────────────────────────────────
+async function menubarAction(action, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('menubar', { body: { action } });
+    toast(action === 'hide' ? '메뉴바 아이콘을 숨겼습니다. 단축키는 계속 동작합니다.' : r.how === 'launched' ? '메뉴바 앱을 다시 켰습니다. 화면 오른쪽 위를 확인하세요.' : '메뉴바 아이콘을 다시 보이게 했습니다.', 4500);
+    setTimeout(refreshStatus, 1500);
+  } catch (e) { toast(e.message, 6000); }
+  finally { if (btn) btn.disabled = false; }
+}
+function renderMenubarState() {
+  const el = $('#mbState'); if (!el) return;
+  const mb = state.status?.menubar;
+  if (!mb) { el.textContent = ''; return; }
+  el.textContent = !mb.installed ? `메뉴바 앱이 설치되어 있지 않습니다(${mb.app}).`
+    : mb.running === null ? '확인 중…'
+    : !mb.running ? '⛔ 꺼져 있음 — 아이콘과 단축키가 모두 동작하지 않습니다.'
+    : mb.iconHidden ? '아이콘 숨김 — 단축키는 동작합니다.' : '✅ 켜져 있음';
+  $('#mbHide').disabled = !mb.running || mb.iconHidden;
+  $('#mbShow').disabled = !mb.installed || (mb.running && !mb.iconHidden);
+}
+$('#mbShow').addEventListener('click', (e) => menubarAction('show', e.currentTarget));
+$('#mbHide').addEventListener('click', (e) => menubarAction('hide', e.currentTarget));
 
 // ── 녹화 제어 ───────────────────────────────────────────────────
 function recOpts() {
@@ -308,7 +337,7 @@ function srcText(s) {
 }
 async function loadSessions() {
   try { state.sessions = (await api('sessions')).sessions; } catch { return; }
-  renderSessions();
+  if (!renaming) renderSessions();
   if (state.open) { const s = state.sessions.find((x) => x.id === state.open); if (s) updateDrawerLive(s); }
 }
 function renderSessions() {
@@ -318,16 +347,64 @@ function renderSessions() {
     $('#sessions').innerHTML = `<div class="empty">${q ? '검색 결과가 없습니다.' : '아직 녹화가 없습니다.<br>위의 빨간 버튼이나 메뉴바 아이콘으로 시작해 보세요.'}</div>`;
     return;
   }
-  $('#sessions').innerHTML = list.map((s) => `
+  const mode = state.config?.naming?.listLabel || 'title';
+  $('#sessions').innerHTML = list.map((s) => {
+    const folder = s.folder || s.id;
+    const big = mode === 'folder' ? folder : (s.title || when(s.createdAt));
+    const showWhen = mode === 'folder' || s.title;
+    return `
     <div class="sess" data-id="${s.id}">
       <div class="ic">${icon(s)}</div>
-      <div style="min-width:0"><div class="t">${esc(s.title || when(s.createdAt))}</div>
-        <div class="m">${s.title ? `${when(s.createdAt)} · ` : ''}${hms(s.durationSec)} · ${srcText(s)} · ${bytes(s.bytes)}</div></div>
+      <div style="min-width:0"><div class="t"><span class="nm" title="${esc(big)}">${esc(big)}</span><button class="edit" data-edit aria-label="이름 바꾸기" title="이름 바꾸기">✏️</button>${s.renamePending ? '<span class="pend" title="녹화·처리가 끝나면 폴더 이름이 바뀝니다">이름 바꿈 대기</span>' : ''}</div>
+        ${mode === 'both' ? `<div class="fn mono" title="Finder 폴더 이름">${esc(folder)}</div>` : ''}
+        <div class="m">${showWhen ? `${when(s.createdAt)} · ` : ''}${hms(s.durationSec)} · ${srcText(s)} · ${bytes(s.bytes)}</div></div>
       <div class="tagrow">${jobTag(s)}</div>
-    </div>`).join('');
-  $$('.sess').forEach((el) => el.addEventListener('click', () => openSession(el.dataset.id)));
+    </div>`;
+  }).join('');
+  $$('.sess').forEach((el) => {
+    let clickT = null;
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('[data-edit], input.rename')) return;
+      // 이름 위 클릭은 두 번 누르기(이름 바꾸기)일 수 있어 잠깐 기다렸다 연다
+      if (e.target.closest('.nm')) { clearTimeout(clickT); if (e.detail === 1) clickT = setTimeout(() => openSession(el.dataset.id), 260); return; }
+      openSession(el.dataset.id);
+    });
+    el.querySelector('[data-edit]').addEventListener('click', (e) => { e.stopPropagation(); startRename(el); });
+    el.querySelector('.nm').addEventListener('dblclick', (e) => { e.stopPropagation(); clearTimeout(clickT); startRename(el); });
+  });
 }
-$('#search').addEventListener('input', renderSessions);
+// ── 목록에서 바로 이름 바꾸기 ─────────────────────────────────────
+// 제목을 고치면 서버가 폴더 이름(설정을 켰으면 폴더 안 파일 이름도)을 규칙대로 바꾼다. 녹화·처리 중이면 끝난 뒤.
+let renaming = null;
+function startRename(el) {
+  const s = state.sessions.find((x) => x.id === el.dataset.id); if (!s) return;
+  renaming = s.id;
+  const t = el.querySelector('.t');
+  t.innerHTML = `<input class="rename" value="${esc(s.title || '')}" placeholder="${esc(when(s.createdAt))}" aria-label="새 이름">`;
+  const inp = t.querySelector('input');
+  inp.focus(); inp.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return; done = true;
+    const v = inp.value.trim();
+    renaming = null;
+    if (!save || v === (s.title || '')) return renderSessions();
+    inp.disabled = true;
+    try {
+      const r = await api(`sessions/${s.id}`, { method: 'PATCH', body: { title: v } });
+      const n = r.naming || {};
+      toast(n.error ? n.error : n.pending ? '제목을 바꿨습니다. 녹화·처리가 끝나면 폴더 이름도 바뀝니다.' : n.renamed ? `이름을 바꿨습니다 → ${n.name}` : '제목을 바꿨습니다.', n.error ? 7000 : 4000);
+    } catch (e) { toast(e.message, 6000); }
+    await loadSessions();
+  };
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); finish(true); }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+  });
+  inp.addEventListener('blur', () => finish(true));
+  inp.addEventListener('click', (e) => e.stopPropagation());
+}
+$('#search').addEventListener('input', () => { if (!renaming) renderSessions(); });
 $('#openFolder').addEventListener('click', () => api('open', { body: { what: 'recordings' } }));
 
 // ── 녹화 상세 ───────────────────────────────────────────────────
@@ -484,7 +561,8 @@ function renderSummary() {
 function renderFiles() {
   const s = detail.session;
   const names = [s.media, s.play !== s.media && s.play, ...(s.extras || []), s.hasTranscript && 'transcript.md', s.hasTranscript && 'transcript.txt', s.hasTranscript && 'transcript.srt', s.hasSummary && 'summary.md'].filter(Boolean);
-  $('#sub-files').innerHTML = `<div class="files">${[...new Set(names)].map((n) => `<div class="row" style="justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line)"><span class="mono">${esc(n)}</span><span class="row"><a href="${fileUrl(s.id, n, true)}">내려받기</a><button class="ghost" data-f="${esc(n)}">Finder</button></span></div>`).join('')}</div>
+  const shown = (n) => s.fileNames?.[n] || n;   // 폴더 이름을 따라 바꾼 파일은 바뀐 이름으로 보인다
+  $('#sub-files').innerHTML = `<div class="files">${[...new Set(names)].map((n) => `<div class="row" style="justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)"><span class="mono" style="overflow-wrap:anywhere;min-width:0">${esc(shown(n))}</span><span class="row"><a href="${fileUrl(s.id, n, true)}">내려받기</a><button class="ghost" data-f="${esc(n)}">Finder</button></span></div>`).join('')}</div>
     <p class="muted">폴더: <span class="mono">${esc(s.dir)}</span></p>`;
   $$('#sub-files [data-f]').forEach((b) => b.addEventListener('click', () => api(`sessions/${s.id}/reveal`, { body: { file: b.dataset.f } })));
 }
@@ -493,8 +571,10 @@ $$('.subtabs button').forEach((b) => b.addEventListener('click', () => {
   $$('.sub').forEach((x) => x.classList.toggle('on', x.id === `sub-${b.dataset.sub}`));
 }));
 $('#dTitle').addEventListener('change', async (e) => {
-  await api(`sessions/${detail.session.id}`, { method: 'PATCH', body: { title: e.target.value } });
-  toast('제목을 바꿨습니다.'); loadSessions();
+  const r = await api(`sessions/${detail.session.id}`, { method: 'PATCH', body: { title: e.target.value } }).catch((err) => ({ naming: { error: err.message } }));
+  toast(r.naming?.error || (r.naming?.pending ? '제목을 바꿨습니다. 녹화·처리가 끝나면 폴더 이름도 바뀝니다.' : r.naming?.renamed ? `이름을 바꿨습니다 → ${r.naming.name}` : '제목을 바꿨습니다.'), 4500);
+  if (r.session) { detail.session = r.session; renderDrawer(); }
+  loadSessions();
 });
 
 // ── 교정 사전 ───────────────────────────────────────────────────
@@ -581,8 +661,26 @@ async function loadSettings() {
   $('#tsCmd').textContent = `tailscale serve --bg --https=${c.port + 1000} http://127.0.0.1:${c.port}`;
   $('#recDir').value = c.recordingsDir; $('#recDirWarn').textContent = '';
   $('#namingPattern').value = c.naming?.pattern || '{date}_{time}_{title}';
+  $('#namingFiles').checked = !!c.naming?.files;
+  $$('#listLabel input').forEach((r) => { r.checked = r.value === (c.naming?.listLabel || 'title'); });
   previewNaming();
+  renderMenubarState();
 }
+$$('#listLabel input').forEach((r) => r.addEventListener('change', async () => {
+  state.config = await api('config', { method: 'PUT', body: { naming: { listLabel: r.value } } });
+  renderSessions();
+  toast('목록 이름 표시를 바꿨습니다.');
+}));
+$('#namingFiles').addEventListener('change', async (e) => {
+  const on = e.target.checked;
+  state.config = await api('config', { method: 'PUT', body: { naming: { files: on } } });
+  const n = state.sessions.length;
+  if (n && confirm(on ? `기존 녹화 ${n}개의 폴더 안 파일 이름도 지금 폴더 이름에 맞출까요?\n\n[취소] 를 누르면 앞으로 끝나는 녹화부터 적용합니다.` : `이름을 바꿔 둔 기존 녹화 파일을 원래 이름(recording.mp4·transcript.md …)으로 되돌릴까요?`)) {
+    const r = await api('naming/apply', { body: {} });
+    toast(`적용했습니다${r.pending ? ` · ${r.pending}개는 처리가 끝난 뒤` : ''}${r.failed ? ` · 실패 ${r.failed}개(원래 이름 유지)` : ''}.`, 5000);
+  } else toast(on ? '앞으로 끝나는 녹화부터 파일 이름이 폴더 이름을 따릅니다.' : '앞으로는 파일 이름을 바꾸지 않습니다.', 4500);
+  loadSessions();
+});
 // ── 녹화 폴더 바꾸기 ────────────────────────────────────────────
 async function checkRecDir() {
   const p = $('#recDir').value.trim(); if (!p) return;
@@ -623,7 +721,7 @@ $('#namingApply').addEventListener('click', async () => {
   await api('config', { method: 'PUT', body: { naming: { pattern: $('#namingPattern').value.trim() || '{date}_{time}_{title}' } } });
   if (!confirm(`기존 녹화 ${state.sessions.length}개의 폴더 이름을 이 규칙으로 바꿀까요? (녹화·처리 중인 것은 끝난 뒤 바뀝니다)`)) return;
   const r = await api('naming/apply', { body: {} });
-  toast(`${r.renamed}개 이름을 바꿨습니다${r.pending ? ` · ${r.pending}개는 처리가 끝난 뒤` : ''}.`, 5000);
+  toast(`${r.renamed}개 이름을 바꿨습니다${r.pending ? ` · ${r.pending}개는 처리가 끝난 뒤` : ''}${r.failed ? ` · 실패 ${r.failed}개(원래 이름 유지)` : ''}.`, 5000);
   loadSessions();
 });
 function showProv() {
@@ -658,6 +756,7 @@ $('#resetPrompt').addEventListener('click', async () => { const r = await api('p
 // ── 시작 ────────────────────────────────────────────────────────
 (async function init() {
   await refreshStatus();
+  try { state.config = await api('config'); } catch {}
   loadDevices();
   loadSessions();
   api('permissions').then((p) => { permCache = p; renderBanners(); }).catch(() => {});

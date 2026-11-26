@@ -82,7 +82,7 @@ export async function summarizeSession(session, dir) {
 export function claudeCodePrompt(session, dir) {
   return [
     `MacRecorder 녹화 «${session.title || session.id}»를 정리해 줘.`,
-    `- 전사: ${path.join(dir, 'transcript.md')}`,
+    `- 전사: ${path.join(dir, session.fileNames?.['transcript.md'] || 'transcript.md')}`,
     `- 교정 사전: ${P.glossary}`,
     `- 요약 형식: ${fs.existsSync(path.join(P.prompts, 'summary.md')) ? path.join(P.prompts, 'summary.md') : path.join(REPO, 'templates', 'summary.md')}`,
     '',
